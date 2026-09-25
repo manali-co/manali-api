@@ -39,6 +39,9 @@ class PostIn(BaseModel):
     summary: str = ""
     url: str
     cover: str | None = None
+    coverText: str | None = None
+    project: str = "manali"
+    date: str = ""
     author: str = "Manali"
 
 

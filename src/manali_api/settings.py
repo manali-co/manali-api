@@ -15,6 +15,8 @@ class Settings:
     tables_endpoint: str = field(default_factory=lambda: os.environ.get("MANALI_TABLES_ENDPOINT", ""))
     tables_connection: str = field(default_factory=lambda: os.environ.get("MANALI_TABLES_CONNECTION", ""))
     token_secret: str = field(default_factory=lambda: os.environ.get("MANALI_TOKEN_SECRET", ""))
+    # Optional postal line for the email footer (some jurisdictions expect one for list mail).
+    mail_address: str = field(default_factory=lambda: os.environ.get("MANALI_MAIL_ADDRESS", ""))
 
     @property
     def configured(self) -> bool:

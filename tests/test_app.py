@@ -25,7 +25,7 @@ def test_subscribe_confirm_announce_unsubscribe() -> None:
     token = store.get_store().get("a@example.com").confirm_token
     r = c.get(f"/confirm?token={token}", follow_redirects=False)
     assert r.status_code == 302 and r.headers["location"].endswith("confirmed=1")
-    assert mailer.sent[-1][1] == "Welcome to manali apps"
+    assert mailer.sent[-1][1] == "You're in"
     assert c.get("/admin/stats", headers=H).json()["subscribers"] == 1
     assert c.post("/subscribe", json={"email": "a@example.com"}, headers=H).status_code == 409
     post = {"slug": "hello", "title": "Hello", "summary": "First.", "url": "https://example.test/blog/hello/", "author": "Ayush"}
@@ -35,6 +35,7 @@ def test_subscribe_confirm_announce_unsubscribe() -> None:
     assert c.post("/unsubscribe", json={"token": unsub}, headers=H).status_code == 200
     assert c.get("/admin/stats", headers=H).json()["subscribers"] == 0
     assert c.get("/admin/stats", headers=H).json()["lastEmail"]["subject"] == "Hello"
+    assert "manali" in mailer.sent[-2][2] and "Read it" in mailer.sent[-2][2]
 
 
 def test_rejects_bad_key_and_bad_email() -> None:
