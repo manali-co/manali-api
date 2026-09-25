@@ -12,6 +12,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from . import mail
+from .reactions import CLIENT, KINDS, SLUG, get_reactions
 from .settings import settings
 from .store import Subscriber, get_store, new_confirm_token, now, unsubscribe_token
 
@@ -43,6 +44,28 @@ class PostIn(BaseModel):
     project: str = "manali"
     date: str = ""
     author: str = "Manali"
+
+
+class ReactIn(BaseModel):
+    client: str = Field(max_length=64)
+    kind: str = Field(max_length=16)
+
+
+@app.get("/reactions/{slug}", dependencies=[Depends(require_key)])
+def reactions(slug: str, client: str = "") -> dict:
+    if not SLUG.match(slug):
+        raise HTTPException(400, "bad slug")
+    c = get_reactions().get(slug, client if CLIENT.match(client) else "")
+    return {"counts": c.counts, "mine": c.mine}
+
+
+@app.post("/reactions/{slug}", dependencies=[Depends(require_key)])
+def react(slug: str, body: ReactIn) -> dict:
+    """Toggle one reaction for one browser. Anonymous by design; the client id is random."""
+    if not SLUG.match(slug) or body.kind not in KINDS or not CLIENT.match(body.client):
+        raise HTTPException(400, "bad request")
+    c = get_reactions().toggle(slug, body.client, body.kind)
+    return {"counts": c.counts, "mine": c.mine}
 
 
 @app.get("/healthz")
