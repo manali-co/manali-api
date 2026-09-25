@@ -1,0 +1,10 @@
+.venv/
+.git*
+tests/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+local.settings.json
+.azure/
+infra/
+README.md

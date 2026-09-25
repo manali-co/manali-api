@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "env": { "value": "dev" },
+    "appInsightsId": { "value": "/subscriptions/a3e539ea-7688-46db-b78d-e73b4476439d/resourceGroups/rg-wsww-dev/providers/microsoft.insights/components/wsww-dev-appi" },
+    "siteUrl": { "value": "https://manali-co.github.io" },
+    "apiKey": { "reference": { "keyVault": { "id": "" }, "secretName": "manali-api-key" } },
+    "tokenSecret": { "reference": { "keyVault": { "id": "" }, "secretName": "manali-token-secret" } },
+    "resendApiKey": { "reference": { "keyVault": { "id": "" }, "secretName": "resend-api-key" } }
+  }
+}

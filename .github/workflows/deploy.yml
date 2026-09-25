@@ -1,0 +1,47 @@
+name: Deploy API
+
+# Provisions rg-manali-dev from Bicep (reusing the existing Application Insights in
+# rg-wsww-dev) and publishes the Function App on every push to main.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-api
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Provision infra
+        env:
+          API_KEY: ${{ secrets.MANALI_API_KEY }}
+          TOKEN_SECRET: ${{ secrets.MANALI_TOKEN_SECRET }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          APPI_ID: ${{ vars.APPINSIGHTS_ID }}
+          SITE_URL: ${{ vars.SITE_URL }}
+        run: |
+          az group create -n rg-manali-dev -l eastus2
+          az deployment group create -g rg-manali-dev \
+            --template-file infra/main.bicep \
+            --parameters env=dev appInsightsId="$APPI_ID" siteUrl="$SITE_URL" \
+              apiKey="$API_KEY" tokenSecret="$TOKEN_SECRET" resendApiKey="$RESEND_API_KEY"
+      - name: Install Azure Functions Core Tools
+        run: npm install -g azure-functions-core-tools@4 --unsafe-perm true
+      - name: Deploy functions (Flex Consumption, remote build)
+        run: func azure functionapp publish manali-dev-api --python --build remote
