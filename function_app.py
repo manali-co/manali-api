@@ -7,7 +7,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 import azure.functions as func  # noqa: E402
+from fastapi import FastAPI  # noqa: E402
 
 from manali_api.app import app as fastapi_app  # noqa: E402
 
-app = func.AsgiFunctionApp(app=fastapi_app, http_auth_level=func.AuthLevel.ANONYMOUS)
+# The ASGI adapter registers "/{*route}" and the host cannot combine that with the default
+# "api" route prefix (it builds "api//{*route}" and refuses to start). So host.json clears the
+# prefix and the API keeps its public /api/... shape by being mounted there.
+root = FastAPI(openapi_url=None)
+root.mount("/api", fastapi_app)
+
+app = func.AsgiFunctionApp(app=root, http_auth_level=func.AuthLevel.ANONYMOUS)
