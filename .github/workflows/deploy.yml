@@ -36,7 +36,9 @@ jobs:
           APPI_ID: ${{ vars.APPINSIGHTS_ID }}
           SITE_URL: ${{ vars.SITE_URL }}
         run: |
-          az group create -n rg-manali-dev -l eastus2
+          # The service principal is scoped to resource groups, so the group is created once by the
+          # owner (see README) and only provisioned here.
+          az group show -n rg-manali-dev -o none
           az deployment group create -g rg-manali-dev \
             --template-file infra/main.bicep \
             --parameters env=dev appInsightsId="$APPI_ID" siteUrl="$SITE_URL" \
