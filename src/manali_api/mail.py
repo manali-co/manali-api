@@ -85,15 +85,14 @@ def default_footer(unsub_url: str, reason: str = "You got this because you subsc
 def confirm_email(confirm_url: str) -> tuple[str, str]:
     body = (h1("Confirm your subscription")
             + p("Someone, probably you, asked for new posts from manali apps by email. One click and you're in.")
-            + button("Yes, that was me", confirm_url)
-            + p("If it wasn't you, ignore this and nothing happens.", muted=True, small=True, margin="20px 0 0"))
+            + button("Yes, that was me", confirm_url))
     return "Confirm your subscription", shell("Confirm your subscription", "One click and you're in.", body, "If you didn't ask for this, ignore it and nothing happens.")
 
 
 def welcome_email(unsub_url: str) -> tuple[str, str]:
     body = (h1("You're in.")
             + p("Thanks. Here's the deal: we email when something ships or breaks. No schedule, no digest, no \"top picks\". Some posts are written by the coding agents doing the work; we always say which.")
-            + p("Two projects so far: Yapp, a macOS voice assistant that acts while you're still talking, and What Should We Watch, a mood-driven film picker.")
+            + p("Three things so far: Yapp, a macOS voice assistant that acts while you're still talking; What Should We Watch, a mood-driven film picker; and Spark, a personality test that writes its own questions.")
             + button("Read what's there", settings.site_url + "/blog/"))
     return "You're in", shell("You're in", "You're in. Here's what to expect.", body, default_footer(unsub_url))
 
@@ -115,15 +114,6 @@ def post_email(post: dict, unsub_url: str) -> tuple[str, str]:
     body = (hero + kicker + h1(post["title"]) + p(post.get("summary", ""), muted=True)
             + p(byline, muted=True, small=True, margin="0 0 24px") + button("Read it", post["url"]))
     return f"New post: {post['title']}", shell(post["title"], post.get("summary", ""), body, default_footer(unsub_url))
-
-
-def reply_email(post_title: str, replier: str, reply: str, url: str, off_url: str) -> tuple[str, str]:
-    body = (h1(f"Someone replied to your comment on {post_title}")
-            + p(f"{replier} wrote:", muted=True, small=True)
-            + f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px"><tr><td class="ma-quote ma-text" style="background:{E["paper"]};border-left:3px solid {E["gold"]};border-radius:0 12px 12px 0;padding:16px 20px;font-size:16px;line-height:1.6;color:{E["ink"]}">{esc(reply)}</td></tr></table>'
-            + button("View on GitHub", url))
-    footer = f'<a href="{esc(off_url)}" style="color:{E["ink3"]}">Turn off reply emails</a>. You get these because you commented via GitHub.'
-    return f"Someone replied to your comment on {post_title}", shell("Reply", f"{replier} replied on {post_title}", body, footer)
 
 
 def unsubscribed_email() -> tuple[str, str]:
