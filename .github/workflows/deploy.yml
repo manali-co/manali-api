@@ -1,24 +1,36 @@
 name: Deploy API
 
-# Provisions rg-manali-dev from Bicep (reusing the existing Application Insights in
-# rg-wsww-dev) and publishes the Function App on every push to main.
+# dev: every push to main provisions rg-manali-dev from Bicep and publishes the Function App.
+# prod: run this workflow by hand with environment=prod (or publish a GitHub release). Each
+# GitHub environment carries its own variables and secrets, so prod can point at its own
+# subscription, resource group, Application Insights, site URL and keys.
 on:
   push:
     branches: [main]
-  workflow_dispatch: {}
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Which environment to deploy
+        type: choice
+        options: [dev, prod]
+        default: dev
 
 permissions:
   id-token: write
   contents: read
 
 concurrency:
-  group: deploy-api
+  group: deploy-api-${{ github.event.inputs.environment || (github.event_name == 'release' && 'prod') || 'dev' }}
   cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: dev
+    environment: ${{ github.event.inputs.environment || (github.event_name == 'release' && 'prod') || 'dev' }}
+    env:
+      ENV: ${{ github.event.inputs.environment || (github.event_name == 'release' && 'prod') || 'dev' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,15 +47,24 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           APPI_ID: ${{ vars.APPINSIGHTS_ID }}
           SITE_URL: ${{ vars.SITE_URL }}
+          MAIL_FROM: ${{ vars.MAIL_FROM }}
         run: |
           # The service principal is scoped to resource groups, so the group is created once by the
           # owner (see README) and only provisioned here.
-          az group show -n rg-manali-dev -o none
-          az deployment group create -g rg-manali-dev \
+          az group show -n "rg-manali-$ENV" -o none
+          az deployment group create -g "rg-manali-$ENV" \
             --template-file infra/main.bicep \
-            --parameters env=dev appInsightsId="$APPI_ID" siteUrl="$SITE_URL" \
-              apiKey="$API_KEY" tokenSecret="$TOKEN_SECRET" resendApiKey="$RESEND_API_KEY"
+            --parameters env="$ENV" appInsightsId="$APPI_ID" siteUrl="$SITE_URL" \
+              apiKey="$API_KEY" tokenSecret="$TOKEN_SECRET" resendApiKey="$RESEND_API_KEY" \
+              ${MAIL_FROM:+mailFrom="$MAIL_FROM"}
       - name: Install Azure Functions Core Tools
         run: npm install -g azure-functions-core-tools@4 --unsafe-perm true
       - name: Deploy functions (Flex Consumption, remote build)
-        run: func azure functionapp publish manali-dev-api --python --build remote
+        run: func azure functionapp publish "manali-$ENV-api" --python --build remote
+      - name: Smoke test
+        run: |
+          for i in $(seq 1 12); do
+            if curl -fsS "https://manali-$ENV-api.azurewebsites.net/api/healthz"; then echo; exit 0; fi
+            sleep 15
+          done
+          echo "healthz never answered" >&2; exit 1
