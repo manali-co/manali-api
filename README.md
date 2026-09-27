@@ -42,7 +42,14 @@ Without `MANALI_TABLES_*` the store is in-memory; without `RESEND_API_KEY` email
 
 ## Deploy
 
-`.github/workflows/deploy.yml` runs on push to `main`: `az deployment group create` with `infra/main.bicep` into `rg-manali-dev`, then `func azure functionapp publish`. It needs, on the repo: variables `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `APPINSIGHTS_ID` (the resource id of `wsww-dev-appi`), `SITE_URL`; secrets `MANALI_API_KEY`, `MANALI_TOKEN_SECRET`, `RESEND_API_KEY`. Same federated-credential setup as `what-should-we-watch`.
+One workflow, `.github/workflows/deploy.yml`, two GitHub environments:
+
+| | Trigger | Resource group | Function app | App Insights |
+|---|---|---|---|---|
+| `dev` | every push to `main` | `rg-manali-dev` | `manali-dev-api` | `wsww-dev-appi` |
+| `prod` | a published release, or a manual run with `environment=prod` | `rg-manali-prod` | `manali-prod-api` | `wsww-prod-appi` |
+
+Each run signs in with OIDC (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`), runs `az deployment group create` with `infra/main.bicep`, publishes with `func azure functionapp publish`, then curls `/healthz`. Variables (`APPINSIGHTS_ID`, `SITE_URL`, optional `MAIL_FROM`) and secrets (`MANALI_API_KEY`, `MANALI_TOKEN_SECRET`, `RESEND_API_KEY`) are read from the environment first, then the repo, so prod carries its own. The service principal is scoped to the two resource groups; the owner creates the group, the role assignments and the federated credential once (see `SETUP.md` in the site repo). Each environment has its own storage account, so prod starts with empty tables.
 
 ## Telemetry
 
