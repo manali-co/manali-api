@@ -21,7 +21,7 @@ param adminKey string = ''
 param resendApiKey string = ''
 @description('Where the site lives; every link in email is built from it. Must be https and must serve /confirm/ and /unsubscribe/.')
 param siteUrl string
-param mailFrom string = 'manali apps <hello@manali.app>'
+param mailFrom string = 'manali apps <hello@manali.page>'
 
 var name = 'manali-${env}'
 var storageName = replace('st${name}${uniqueString(resourceGroup().id)}', '-', '')

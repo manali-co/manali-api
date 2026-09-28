@@ -21,7 +21,7 @@ class Settings:
     admin_key: str = field(default_factory=lambda: _env("MANALI_ADMIN_KEY"))
     site_url: str = field(default_factory=lambda: _env("MANALI_SITE_URL").rstrip("/"))
     resend_api_key: str = field(default_factory=lambda: _env("RESEND_API_KEY"))
-    mail_from: str = field(default_factory=lambda: _env("MANALI_MAIL_FROM", "manali apps <hello@manali.app>"))
+    mail_from: str = field(default_factory=lambda: _env("MANALI_MAIL_FROM", "manali apps <hello@manali.page>"))
     tables_endpoint: str = field(default_factory=lambda: _env("MANALI_TABLES_ENDPOINT"))
     tables_connection: str = field(default_factory=lambda: _env("MANALI_TABLES_CONNECTION"))
     token_secret: str = field(default_factory=lambda: _env("MANALI_TOKEN_SECRET"))
