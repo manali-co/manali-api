@@ -40,7 +40,7 @@ jobs:
       - run: uv run mypy src
       - run: uv run pytest -q
       - name: requirements.txt matches the lockfile
-        run: uv export --no-hashes --no-dev --no-emit-project -o /tmp/req.txt && diff -u requirements.txt /tmp/req.txt
+        run: uv export --no-hashes --no-dev --no-emit-project -o requirements.txt && git diff --exit-code -- requirements.txt
 
   deploy:
     needs: test
