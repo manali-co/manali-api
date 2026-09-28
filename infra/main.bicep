@@ -6,8 +6,8 @@ targetScope = 'resourceGroup'
 @description('Short environment name, e.g. dev or prod')
 param env string = 'dev'
 param location string = resourceGroup().location
-@description('Resource id of the existing Application Insights component to report to')
-param appInsightsId string
+@description('Resource id of an existing Application Insights component to report to. Leave empty to create one in this resource group (with its own Log Analytics workspace).')
+param appInsightsId string = ''
 @secure()
 @minLength(32)
 param apiKey string
@@ -26,10 +26,27 @@ param mailFrom string = 'manali apps <hello@manali.page>'
 var name = 'manali-${env}'
 var storageName = replace('st${name}${uniqueString(resourceGroup().id)}', '-', '')
 
-resource appi 'Microsoft.Insights/components@2020-02-02' existing = {
-  name: last(split(appInsightsId, '/'))
-  scope: resourceGroup(split(appInsightsId, '/')[2], split(appInsightsId, '/')[4])
+var ownAppi = empty(appInsightsId)
+
+resource existingAppi 'Microsoft.Insights/components@2020-02-02' existing = if (!ownAppi) {
+  name: ownAppi ? 'unused' : last(split(appInsightsId, '/'))
+  scope: resourceGroup(ownAppi ? subscription().subscriptionId : split(appInsightsId, '/')[2], ownAppi ? resourceGroup().name : split(appInsightsId, '/')[4])
 }
+
+resource logs 'Microsoft.OperationalInsights/workspaces@2023-09-01' = if (ownAppi) {
+  name: '${name}-logs'
+  location: location
+  properties: { sku: { name: 'PerGB2018' }, retentionInDays: 30 }
+}
+
+resource newAppi 'Microsoft.Insights/components@2020-02-02' = if (ownAppi) {
+  name: '${name}-appi'
+  location: location
+  kind: 'web'
+  properties: { Application_Type: 'web', WorkspaceResourceId: logs.id, IngestionMode: 'LogAnalytics' }
+}
+
+var appiConnection = ownAppi ? newAppi!.properties.ConnectionString : existingAppi!.properties.ConnectionString
 
 resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: take(storageName, 24)
@@ -67,7 +84,7 @@ resource func 'Microsoft.Web/sites@2023-12-01' = {
     siteConfig: {
       appSettings: [
         { name: 'AzureWebJobsStorage__accountName', value: storage.name }
-        { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appi.properties.ConnectionString }
+        { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appiConnection }
         { name: 'MANALI_TABLES_ENDPOINT', value: storage.properties.primaryEndpoints.table }
         { name: 'MANALI_ENV', value: env }
         { name: 'MANALI_API_KEY', value: apiKey }
@@ -100,3 +117,4 @@ resource roleAssignments 'Microsoft.Authorization/roleAssignments@2022-04-01' = 
 output apiUrl string = 'https://${func.properties.defaultHostName}/api'
 output functionAppName string = func.name
 output storageAccount string = storage.name
+output appInsightsName string = ownAppi ? newAppi!.name : last(split(appInsightsId, '/'))

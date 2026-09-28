@@ -69,7 +69,7 @@ jobs:
           MAIL_FROM: ${{ vars.MAIL_FROM }}
         run: |
           # Fail here, not in a subscriber's inbox: an empty variable would otherwise reach the app.
-          : "${APPI_ID:?APPINSIGHTS_ID variable is not set for this environment}"
+          # APPINSIGHTS_ID may be empty: Bicep then creates an Application Insights in the resource group.
           : "${SITE_URL:?SITE_URL variable is not set for this environment}"
           : "${API_KEY:?MANALI_API_KEY secret is not set for this environment}"
           : "${TOKEN_SECRET:?MANALI_TOKEN_SECRET secret is not set for this environment}"
