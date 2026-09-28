@@ -9,12 +9,18 @@ param location string = resourceGroup().location
 @description('Resource id of the existing Application Insights component to report to')
 param appInsightsId string
 @secure()
+@minLength(32)
 param apiKey string
 @secure()
+@minLength(32)
 param tokenSecret string
+@description('Separate key for /admin/*; the site\'s public routes never carry it')
+@secure()
+param adminKey string = ''
 @secure()
 param resendApiKey string = ''
-param siteUrl string = 'https://manali-co.github.io'
+@description('Where the site lives; every link in email is built from it. Must be https and must serve /confirm/ and /unsubscribe/.')
+param siteUrl string
 param mailFrom string = 'manali apps <hello@manali.app>'
 
 var name = 'manali-${env}'
@@ -30,7 +36,7 @@ resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   location: location
   sku: { name: 'Standard_LRS' }
   kind: 'StorageV2'
-  properties: { minimumTlsVersion: 'TLS1_2', allowBlobPublicAccess: false, supportsHttpsTrafficOnly: true }
+  properties: { minimumTlsVersion: 'TLS1_2', allowBlobPublicAccess: false, allowSharedKeyAccess: false, supportsHttpsTrafficOnly: true }
 }
 
 resource deployContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
@@ -63,7 +69,9 @@ resource func 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'AzureWebJobsStorage__accountName', value: storage.name }
         { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appi.properties.ConnectionString }
         { name: 'MANALI_TABLES_ENDPOINT', value: storage.properties.primaryEndpoints.table }
+        { name: 'MANALI_ENV', value: env }
         { name: 'MANALI_API_KEY', value: apiKey }
+        { name: 'MANALI_ADMIN_KEY', value: adminKey }
         { name: 'MANALI_TOKEN_SECRET', value: tokenSecret }
         { name: 'RESEND_API_KEY', value: resendApiKey }
         { name: 'MANALI_SITE_URL', value: siteUrl }

@@ -1,8 +1,11 @@
 """Subscribers and a tiny event log, in Azure Table Storage.
 
-Two tables: `subscribers` (PartitionKey "sub", RowKey = lowercased email) and `events`
-(PartitionKey "email", RowKey = reverse-timestamp so the newest sorts first). An in-memory
-store stands in for tests and local runs without a storage account.
+Two tables: `subscribers` (PartitionKey "sub", RowKey = sha256 of the lowercased address, the
+address itself is a property) and `events` (PartitionKey "email", RowKey = reverse-timestamp so
+the newest sorts first). An in-memory store stands in for tests and local runs without a
+storage account.
+
+Unsubscribe deletes the row. The only thing an ex-subscriber leaves behind is nothing.
 """
 from __future__ import annotations
 
@@ -10,10 +13,15 @@ import hashlib
 import hmac
 import secrets
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
-from typing import Protocol
+from datetime import UTC, datetime, timedelta
+from typing import Any, Protocol
 
 from .settings import settings
+
+
+def key(email: str) -> str:
+    """Row key: a hash, so any valid address fits Table Storage's key rules."""
+    return hashlib.sha256(email.strip().lower().encode()).hexdigest()[:32]
 
 
 @dataclass
@@ -21,15 +29,16 @@ class Subscriber:
     email: str
     created: str
     confirmed: bool = False
-    unsubscribed: bool = False
     source: str = "site"
     confirm_token: str = ""
+    sends: int = 0  # confirmation emails sent for this address
+    last_sent: str = ""
 
-    def to_row(self) -> dict:
-        return {"PartitionKey": "sub", "RowKey": self.email, **asdict(self)}
+    def to_row(self) -> dict[str, Any]:
+        return {"PartitionKey": "sub", "RowKey": key(self.email), **asdict(self)}
 
     @classmethod
-    def from_row(cls, row: dict) -> Subscriber:
+    def from_row(cls, row: dict[str, Any]) -> Subscriber:
         return cls(**{k: row[k] for k in cls.__dataclass_fields__ if k in row})
 
 
@@ -37,46 +46,84 @@ def now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+def parse(stamp: str) -> datetime:
+    return datetime.fromisoformat(stamp) if stamp else datetime.fromtimestamp(0, UTC)
+
+
 def unsubscribe_token(email: str) -> str:
-    """Stable, unguessable per-address token so unsubscribe links never expire."""
-    return hmac.new(settings.token_secret.encode(), email.lower().encode(), hashlib.sha256).hexdigest()[:32]
+    """`<row key>.<mac>`: stable per address so links never expire, and the row key part makes
+    the lookup O(1) instead of a scan over every subscriber."""
+    k = key(email)
+    mac = hmac.new(settings.token_secret.encode(), k.encode(), hashlib.sha256).hexdigest()[:32]
+    return f"{k}.{mac}"
+
+
+def split_unsub_token(token: str) -> str | None:
+    """The row key inside a valid token, or None if the MAC does not check out."""
+    k, _, mac = token.partition(".")
+    if len(k) != 32 or len(mac) != 32:
+        return None
+    want = hmac.new(settings.token_secret.encode(), k.encode(), hashlib.sha256).hexdigest()[:32]
+    return k if hmac.compare_digest(mac, want) else None
 
 
 class Store(Protocol):
     def get(self, email: str) -> Subscriber | None: ...
+    def get_by_key(self, k: str) -> Subscriber | None: ...
     def put(self, sub: Subscriber) -> None: ...
+    def delete(self, sub: Subscriber) -> None: ...
     def all(self) -> list[Subscriber]: ...
     def by_confirm_token(self, token: str) -> Subscriber | None: ...
-    def by_unsub_token(self, token: str) -> Subscriber | None: ...
-    def log_email(self, subject: str, recipients: int) -> None: ...
-    def last_email(self) -> dict | None: ...
+    def log_email(self, subject: str, recipients: int, slug: str = "") -> None: ...
+    def last_email(self) -> dict[str, Any] | None: ...
+    def announced(self, slug: str) -> bool: ...
+
+
+def by_unsub_token(store: Store, token: str) -> Subscriber | None:
+    k = split_unsub_token(token)
+    return store.get_by_key(k) if k else None
+
+
+def purge_pending(store: Store, days: int = 7) -> int:
+    """Addresses that never confirmed are not ours to keep."""
+    cutoff = datetime.now(UTC) - timedelta(days=days)
+    stale = [s for s in store.all() if not s.confirmed and parse(s.created) < cutoff]
+    for s in stale:
+        store.delete(s)
+    return len(stale)
 
 
 class MemoryStore:
     def __init__(self) -> None:
         self.rows: dict[str, Subscriber] = {}
-        self.events: list[dict] = []
+        self.events: list[dict[str, Any]] = []
 
     def get(self, email: str) -> Subscriber | None:
-        return self.rows.get(email.lower())
+        return self.rows.get(key(email))
+
+    def get_by_key(self, k: str) -> Subscriber | None:
+        return self.rows.get(k)
 
     def put(self, sub: Subscriber) -> None:
-        self.rows[sub.email.lower()] = sub
+        self.rows[key(sub.email)] = sub
+
+    def delete(self, sub: Subscriber) -> None:
+        self.rows.pop(key(sub.email), None)
 
     def all(self) -> list[Subscriber]:
         return list(self.rows.values())
 
     def by_confirm_token(self, token: str) -> Subscriber | None:
-        return next((s for s in self.rows.values() if s.confirm_token and s.confirm_token == token), None)
+        return next((s for s in self.rows.values() if s.confirm_token and hmac.compare_digest(s.confirm_token, token)), None)
 
-    def by_unsub_token(self, token: str) -> Subscriber | None:
-        return next((s for s in self.rows.values() if unsubscribe_token(s.email) == token), None)
+    def log_email(self, subject: str, recipients: int, slug: str = "") -> None:
+        self.events.insert(0, {"subject": subject, "sent": now(), "recipients": recipients, "slug": slug})
 
-    def log_email(self, subject: str, recipients: int) -> None:
-        self.events.insert(0, {"subject": subject, "sent": now(), "recipients": recipients})
-
-    def last_email(self) -> dict | None:
+    def last_email(self) -> dict[str, Any] | None:
         return self.events[0] if self.events else None
+
+    def announced(self, slug: str) -> bool:
+        return any(e.get("slug") == slug for e in self.events)
 
 
 class TableStore:
@@ -93,13 +140,26 @@ class TableStore:
         self.events = svc.create_table_if_not_exists("events")
 
     def get(self, email: str) -> Subscriber | None:
+        return self.get_by_key(key(email))
+
+    def get_by_key(self, k: str) -> Subscriber | None:
+        from azure.core.exceptions import ResourceNotFoundError
+
         try:
-            return Subscriber.from_row(self.subs.get_entity("sub", email.lower()))
-        except Exception:
-            return None
+            return Subscriber.from_row(self.subs.get_entity("sub", k))
+        except ResourceNotFoundError:
+            return None  # anything else (throttle, auth) raises: never mistake an outage for "new"
 
     def put(self, sub: Subscriber) -> None:
         self.subs.upsert_entity(sub.to_row())
+
+    def delete(self, sub: Subscriber) -> None:
+        from azure.core.exceptions import ResourceNotFoundError
+
+        try:
+            self.subs.delete_entity("sub", key(sub.email))
+        except ResourceNotFoundError:
+            pass
 
     def all(self) -> list[Subscriber]:
         return [Subscriber.from_row(r) for r in self.subs.query_entities("PartitionKey eq 'sub'")]
@@ -108,17 +168,19 @@ class TableStore:
         rows = list(self.subs.query_entities("PartitionKey eq 'sub' and confirm_token eq @t", parameters={"t": token}))
         return Subscriber.from_row(rows[0]) if rows else None
 
-    def by_unsub_token(self, token: str) -> Subscriber | None:
-        return next((s for s in self.all() if unsubscribe_token(s.email) == token), None)
-
-    def log_email(self, subject: str, recipients: int) -> None:
+    def log_email(self, subject: str, recipients: int, slug: str = "") -> None:
         stamp = f"{10**13 - int(datetime.now(UTC).timestamp() * 1000):013d}"
-        self.events.upsert_entity({"PartitionKey": "email", "RowKey": stamp, "subject": subject, "sent": now(), "recipients": recipients})
+        row = {"PartitionKey": "email", "RowKey": stamp, "subject": subject, "sent": now(), "recipients": recipients, "slug": slug}
+        self.events.upsert_entity(row)
 
-    def last_email(self) -> dict | None:
+    def last_email(self) -> dict[str, Any] | None:
         for r in self.events.query_entities("PartitionKey eq 'email'", results_per_page=1):
             return {"subject": r["subject"], "sent": r["sent"], "recipients": int(r["recipients"])}
         return None
+
+    def announced(self, slug: str) -> bool:
+        rows = self.events.query_entities("PartitionKey eq 'email' and slug eq @s", parameters={"s": slug}, select=["RowKey"])
+        return any(True for _ in rows)
 
 
 _store: Store | None = None
@@ -127,7 +189,12 @@ _store: Store | None = None
 def get_store() -> Store:
     global _store
     if _store is None:
-        _store = TableStore() if (settings.tables_endpoint or settings.tables_connection) else MemoryStore()
+        if settings.tables_endpoint or settings.tables_connection:
+            _store = TableStore()
+        elif settings.fake_allowed:
+            _store = MemoryStore()
+        else:
+            raise RuntimeError("no storage configured; set MANALI_TABLES_ENDPOINT")
     return _store
 
 

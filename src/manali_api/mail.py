@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import html
 import logging
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 
@@ -21,8 +21,8 @@ E = {
     "font": "Inter, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
     "display": "Comfortaa, Inter, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
 }
-LABELS = {"yapp": "Yapp", "what-should-we-watch": "What Should We Watch", "manali": "manali apps"}
-DOTS = {"yapp": "#E8B79A", "what-should-we-watch": "#EE8079", "manali": "#5B63C7"}
+LABELS = {"yapp": "Yapp", "what-should-we-watch": "What Should We Watch", "spark": "Spark", "manali": "manali apps"}
+DOTS = {"yapp": "#E8B79A", "what-should-we-watch": "#EE8079", "spark": "#E03C7A", "manali": "#5B63C7"}
 AVATAR = "https://raw.githubusercontent.com/manali-co/.github/main/brand/png/github-avatar-500.png"
 
 CSS = f"""
@@ -97,7 +97,7 @@ def welcome_email(unsub_url: str) -> tuple[str, str]:
     return "You're in", shell("You're in", "You're in. Here's what to expect.", body, default_footer(unsub_url))
 
 
-def post_email(post: dict, unsub_url: str) -> tuple[str, str]:
+def post_email(post: dict[str, Any], unsub_url: str) -> tuple[str, str]:
     project = post.get("project") or "manali"
     dot = DOTS.get(project, E["indigo"])
     if post.get("cover"):
@@ -123,33 +123,79 @@ def unsubscribed_email() -> tuple[str, str]:
 
 
 class Mailer(Protocol):
-    def send(self, to: list[str], subject: str, html_body: str) -> int: ...
+    def send(self, to: str, subject: str, html_body: str, headers: dict[str, Any] | None = None) -> int: ...
+    def send_many(self, messages: list[dict[str, Any]], idempotency: str = "") -> int: ...
+
+
+def message(to: str, subject: str, html_body: str, headers: dict[str, Any] | None = None) -> dict[str, Any]:
+    m: dict[str, Any] = {"from": settings.mail_from, "to": [to], "subject": subject.replace("\r", " ").replace("\n", " "), "html": html_body}
+    if headers:
+        m["headers"] = headers
+    return m
+
+
+def unsubscribe_headers(unsub_url: str) -> dict[str, Any]:
+    """RFC 8058 one-click unsubscribe; Gmail and Yahoo expect it on list mail."""
+    return {"List-Unsubscribe": f"<{unsub_url}>", "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"}
 
 
 class ResendMailer:
-    def send(self, to: list[str], subject: str, html_body: str) -> int:
+    """Batches of 100 (Resend's limit), retried on 429/5xx with backoff, idempotent per batch so a
+    retried announce never double-sends. Returns how many messages Resend accepted."""
+
+    BATCH = 100
+    RETRIES = 4
+
+    def send(self, to: str, subject: str, html_body: str, headers: dict[str, Any] | None = None) -> int:
+        return self.send_many([message(to, subject, html_body, headers)])
+
+    def send_many(self, messages: list[dict[str, Any]], idempotency: str = "") -> int:
         if not settings.resend_api_key:
-            log.warning("RESEND_API_KEY missing; not sending %r to %d addresses", subject, len(to))
+            log.error("RESEND_API_KEY missing; %d message(s) NOT sent", len(messages))
             return 0
+        import time
+
         sent = 0
-        with httpx.Client(timeout=20, headers={"Authorization": f"Bearer {settings.resend_api_key}"}) as c:
-            for i in range(0, len(to), 100):  # Resend batch limit
-                batch = [{"from": settings.mail_from, "to": [addr], "subject": subject, "html": html_body} for addr in to[i : i + 100]]
-                r = c.post("https://api.resend.com/emails/batch", json=batch)
-                if r.status_code >= 300:
-                    log.error("resend batch failed: %s %s", r.status_code, r.text[:200])
-                    continue
-                sent += len(batch)
+        with httpx.Client(timeout=30, headers={"Authorization": f"Bearer {settings.resend_api_key}"}) as c:
+            for i in range(0, len(messages), self.BATCH):
+                batch = messages[i : i + self.BATCH]
+                headers = {"Idempotency-Key": f"{idempotency}/{i // self.BATCH}"[:256]} if idempotency else {}
+                for attempt in range(self.RETRIES):
+                    try:
+                        r = c.post("https://api.resend.com/emails/batch", json=batch, headers=headers)
+                    except httpx.HTTPError as e:
+                        log.warning("resend batch %d attempt %d: %s", i // self.BATCH, attempt, e)
+                        time.sleep(1.5 * (attempt + 1))
+                        continue
+                    if r.status_code < 300:
+                        sent += len(batch)
+                        break
+                    if r.status_code == 429 or r.status_code >= 500:
+                        wait = float(r.headers.get("retry-after") or 1.5 * (attempt + 1))
+                        log.warning("resend batch %d: %s, retrying in %.1fs", i // self.BATCH, r.status_code, wait)
+                        time.sleep(min(wait, 20))
+                        continue
+                    log.error("resend batch %d failed: %s %s", i // self.BATCH, r.status_code, r.text[:200])
+                    break
+                else:
+                    log.error("resend batch %d gave up after %d attempts", i // self.BATCH, self.RETRIES)
         return sent
 
 
 class MemoryMailer:
+    """Only for MANALI_ENV=local or test. Never a stand-in for a missing key in prod."""
+
     def __init__(self) -> None:
         self.sent: list[tuple[list[str], str, str]] = []
 
-    def send(self, to: list[str], subject: str, html_body: str) -> int:
-        self.sent.append((to, subject, html_body))
-        return len(to)
+    def send(self, to: str, subject: str, html_body: str, headers: dict[str, Any] | None = None) -> int:
+        self.sent.append(([to], subject, html_body))
+        return 1
+
+    def send_many(self, messages: list[dict[str, Any]], idempotency: str = "") -> int:
+        for m in messages:
+            self.sent.append((m["to"], m["subject"], m["html"]))
+        return len(messages)
 
 
 _mailer: Mailer | None = None
@@ -158,5 +204,5 @@ _mailer: Mailer | None = None
 def get_mailer() -> Mailer:
     global _mailer
     if _mailer is None:
-        _mailer = ResendMailer() if settings.resend_api_key else MemoryMailer()
+        _mailer = MemoryMailer() if (settings.fake_allowed and not settings.resend_api_key) else ResendMailer()
     return _mailer

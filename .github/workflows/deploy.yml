@@ -1,10 +1,11 @@
-name: Deploy API
+name: CI and deploy
 
 # dev: every push to main provisions rg-manali-dev from Bicep and publishes the Function App.
 # prod: run this workflow by hand with environment=prod (or publish a GitHub release). Each
 # GitHub environment carries its own variables and secrets, so prod can point at its own
 # subscription, resource group, Application Insights, site URL and keys.
 on:
+  pull_request:
   push:
     branches: [main]
   release:
@@ -26,7 +27,24 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - run: uv python install 3.12
+      - run: uv sync --extra dev
+      - run: uv run ruff check .
+      - run: uv run mypy src
+      - run: uv run pytest -q
+      - name: requirements.txt matches the lockfile
+        run: uv export --no-hashes --no-dev --no-emit-project -o /tmp/req.txt && diff -u requirements.txt /tmp/req.txt
+
   deploy:
+    needs: test
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment: ${{ github.event.inputs.environment || (github.event_name == 'release' && 'prod') || 'dev' }}
     env:
@@ -43,28 +61,49 @@ jobs:
       - name: Provision infra
         env:
           API_KEY: ${{ secrets.MANALI_API_KEY }}
+          ADMIN_KEY: ${{ secrets.MANALI_ADMIN_KEY }}
           TOKEN_SECRET: ${{ secrets.MANALI_TOKEN_SECRET }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           APPI_ID: ${{ vars.APPINSIGHTS_ID }}
           SITE_URL: ${{ vars.SITE_URL }}
           MAIL_FROM: ${{ vars.MAIL_FROM }}
         run: |
+          # Fail here, not in a subscriber's inbox: an empty variable would otherwise reach the app.
+          : "${APPI_ID:?APPINSIGHTS_ID variable is not set for this environment}"
+          : "${SITE_URL:?SITE_URL variable is not set for this environment}"
+          : "${API_KEY:?MANALI_API_KEY secret is not set for this environment}"
+          : "${TOKEN_SECRET:?MANALI_TOKEN_SECRET secret is not set for this environment}"
+          case "$SITE_URL" in https://*) ;; *) echo "SITE_URL must be https"; exit 1;; esac
           # The service principal is scoped to resource groups, so the group is created once by the
           # owner (see README) and only provisioned here.
           az group show -n "rg-manali-$ENV" -o none
           az deployment group create -g "rg-manali-$ENV" \
             --template-file infra/main.bicep \
             --parameters env="$ENV" appInsightsId="$APPI_ID" siteUrl="$SITE_URL" \
-              apiKey="$API_KEY" tokenSecret="$TOKEN_SECRET" resendApiKey="$RESEND_API_KEY" \
+              apiKey="$API_KEY" tokenSecret="$TOKEN_SECRET" adminKey="$ADMIN_KEY" resendApiKey="$RESEND_API_KEY" \
               ${MAIL_FROM:+mailFrom="$MAIL_FROM"}
       - name: Install Azure Functions Core Tools
         run: npm install -g azure-functions-core-tools@4 --unsafe-perm true
       - name: Deploy functions (Flex Consumption, remote build)
         run: func azure functionapp publish "manali-$ENV-api" --python --build remote
       - name: Smoke test
+        env:
+          API_KEY: ${{ secrets.MANALI_API_KEY }}
+          ADMIN_KEY: ${{ secrets.MANALI_ADMIN_KEY }}
         run: |
-          for i in $(seq 1 12); do
-            if curl -fsS "https://manali-$ENV-api.azurewebsites.net/api/healthz"; then echo; exit 0; fi
+          base="https://manali-$ENV-api.azurewebsites.net/api"
+          for i in $(seq 1 16); do
+            if out=$(curl -fsS "$base/healthz") && echo "$out" | jq -e '.configured == true' >/dev/null; then
+              echo "$out" | jq .
+              if [ -n "$ADMIN_KEY" ]; then
+                # exercises the managed identity against Table Storage; role assignments can take a few minutes
+                curl -fsS -H "x-api-key: $API_KEY" -H "x-admin-key: $ADMIN_KEY" "$base/admin/stats" | jq '{subscribers, pending}' && exit 0
+              else
+                exit 0
+              fi
+            fi
             sleep 15
           done
-          echo "healthz never answered" >&2; exit 1
+          echo "the API never reported configured=true (or the admin read failed)" >&2
+          curl -sS "$base/healthz" || true
+          exit 1

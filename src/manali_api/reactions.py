@@ -78,12 +78,16 @@ class TableReactions:
         return Counts(counts, sorted(mine))
 
     def toggle(self, slug: str, client: str, kind: str) -> Counts:
+        from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
+
         row_key = f"{client}|{kind}"
         try:
-            self.t.get_entity(slug, row_key)
-            self.t.delete_entity(slug, row_key)
-        except Exception:
-            self.t.upsert_entity({"PartitionKey": slug, "RowKey": row_key})
+            self.t.delete_entity(slug, row_key)  # a second tap removes
+        except ResourceNotFoundError:
+            try:
+                self.t.create_entity({"PartitionKey": slug, "RowKey": row_key})
+            except ResourceExistsError:
+                pass  # two taps raced; the row exists, which is what "on" means
         return self.get(slug, client)
 
 
@@ -93,5 +97,10 @@ _store: ReactionStore | None = None
 def get_reactions() -> ReactionStore:
     global _store
     if _store is None:
-        _store = TableReactions() if (settings.tables_endpoint or settings.tables_connection) else MemoryReactions()
+        if settings.tables_endpoint or settings.tables_connection:
+            _store = TableReactions()
+        elif settings.fake_allowed:
+            _store = MemoryReactions()
+        else:
+            raise RuntimeError("no storage configured; set MANALI_TABLES_ENDPOINT")
     return _store

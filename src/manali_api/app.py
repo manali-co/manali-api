@@ -1,49 +1,93 @@
-"""manali apps backend: subscribers and email. Small on purpose.
+"""manali apps backend: subscribers, email, reactions. Small on purpose.
 
-Auth: every route except /confirm and /healthz needs `x-api-key` (the site's server holds it;
-browsers never see it). Tokens in links are per-address HMACs, so unsubscribe never expires.
+Auth: every route except /healthz needs `x-api-key` (the site's server holds it; browsers never
+see it). /admin/* needs `x-admin-key` on top, a separate secret the public routes never carry.
+Links in email carry per-address HMAC tokens; the state change only happens on a POST from the
+site, never on the GET a link scanner performs.
 """
 from __future__ import annotations
 
+import hmac
 import re
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from . import mail
 from .reactions import CLIENT, KINDS, SLUG, get_reactions
 from .settings import settings
-from .store import Subscriber, get_store, new_confirm_token, now, unsubscribe_token
+from .store import Subscriber, by_unsub_token, get_store, new_confirm_token, now, parse, purge_pending, unsubscribe_token
 
-app = FastAPI(title="manali apps api", docs_url=None, redoc_url=None)
-EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+app = FastAPI(title="manali apps api", docs_url=None, redoc_url=None, openapi_url=None)
+# Local part: no control characters and none of the characters Table Storage rejects in keys
+# (keys are hashed now, but keep addresses sane); one domain with a dot.
+EMAIL = re.compile(r"^[A-Za-z0-9!$%&'*+=^_`{|}~.-]{1,64}@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
+RESEND_WINDOW = timedelta(minutes=10)
+MAX_CONFIRM_SENDS_PER_DAY = 3
 
 
-def require_key(x_api_key: str = Header(default="")) -> None:
-    if not settings.api_key or x_api_key != settings.api_key:
+def _same(a: str, b: str) -> bool:
+    return bool(a) and bool(b) and hmac.compare_digest(a.encode(), b.encode())
+
+
+def ready() -> None:
+    if settings.problems:
+        raise HTTPException(503, "api not configured: " + "; ".join(settings.problems))
+
+
+def require_key(x_api_key: str = Header(default=""), _: None = Depends(ready)) -> None:
+    if not _same(x_api_key, settings.api_key):
         raise HTTPException(401, "missing or wrong api key")
+
+
+def require_admin(x_admin_key: str = Header(default=""), _: None = Depends(require_key)) -> None:
+    if not settings.admin_key:
+        raise HTTPException(503, "MANALI_ADMIN_KEY not set")
+    if not _same(x_admin_key, settings.admin_key):
+        raise HTTPException(401, "missing or wrong admin key")
 
 
 class SubscribeIn(BaseModel):
     email: str = Field(max_length=254)
-    source: str = "site"
+    source: str = Field(default="site", max_length=32)
 
 
 class TokenIn(BaseModel):
-    token: str = Field(max_length=64)
+    token: str = Field(max_length=80)
 
 
 class PostIn(BaseModel):
-    slug: str
-    title: str
-    summary: str = ""
+    slug: str = Field(max_length=120)
+    title: str = Field(max_length=200)
+    summary: str = Field(default="", max_length=600)
     url: str
     cover: str | None = None
-    coverText: str | None = None
+    coverText: str | None = Field(default=None, max_length=40)
     project: str = "manali"
-    date: str = ""
-    author: str = "Manali"
+    date: str = Field(default="", max_length=40)
+    author: str = Field(default="Manali", max_length=120)
+    force: bool = False
+
+    @field_validator("slug")
+    @classmethod
+    def _slug(cls, v: str) -> str:
+        if not SLUG.match(v):
+            raise ValueError("bad slug")
+        return v
+
+    @field_validator("url", "cover")
+    @classmethod
+    def _https(cls, v: str | None) -> str | None:
+        if v is not None and not v.startswith("https://"):
+            raise ValueError("links in email must be https")
+        return v
+
+    @field_validator("title", "summary", "author")
+    @classmethod
+    def _one_line(cls, v: str) -> str:
+        return re.sub(r"[\r\n\t]+", " ", v).strip()
 
 
 class ReactIn(BaseModel):
@@ -51,16 +95,31 @@ class ReactIn(BaseModel):
     kind: str = Field(max_length=16)
 
 
+@app.get("/healthz")
+def healthz() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "configured": settings.configured,
+        "mail": settings.mail_ready,
+        "site_url": settings.site_url,
+        "problems": settings.problems,
+    }
+
+
+# --- reactions -------------------------------------------------------------------------------
+
 @app.get("/reactions/{slug}", dependencies=[Depends(require_key)])
-def reactions(slug: str, client: str = "") -> dict:
+def reactions(slug: str, x_client: str = Header(default="")) -> dict[str, Any]:
+    """Counts for a post. The browser's own reactions come back only when it sends its id in a
+    header, so the id never lands in a request URL or a log."""
     if not SLUG.match(slug):
         raise HTTPException(400, "bad slug")
-    c = get_reactions().get(slug, client if CLIENT.match(client) else "")
+    c = get_reactions().get(slug, x_client if CLIENT.match(x_client) else "")
     return {"counts": c.counts, "mine": c.mine}
 
 
 @app.post("/reactions/{slug}", dependencies=[Depends(require_key)])
-def react(slug: str, body: ReactIn) -> dict:
+def react(slug: str, body: ReactIn) -> dict[str, Any]:
     """Toggle one reaction for one browser. Anonymous by design; the client id is random."""
     if not SLUG.match(slug) or body.kind not in KINDS or not CLIENT.match(body.client):
         raise HTTPException(400, "bad request")
@@ -68,75 +127,99 @@ def react(slug: str, body: ReactIn) -> dict:
     return {"counts": c.counts, "mine": c.mine}
 
 
-@app.get("/healthz")
-def healthz() -> dict:
-    return {"ok": True, "configured": settings.configured}
-
+# --- subscribers -----------------------------------------------------------------------------
 
 @app.post("/subscribe", status_code=202, dependencies=[Depends(require_key)])
-def subscribe(body: SubscribeIn) -> dict:
+def subscribe(body: SubscribeIn) -> dict[str, Any]:
+    """Always 202: the response never says whether an address is on the list. A confirmation
+    goes out at most once per ten minutes and three times a day per address, and the token is
+    reused, so a flood of requests cannot bomb an inbox or kill the link in the first email."""
     email = body.email.strip().lower()
     if not EMAIL.match(email):
         raise HTTPException(400, "invalid email")
     store = get_store()
     sub = store.get(email)
-    if sub and sub.confirmed and not sub.unsubscribed:
-        raise HTTPException(409, "already subscribed")
-    sub = Subscriber(email=email, created=now(), source=body.source[:32], confirm_token=new_confirm_token())
+    if sub and sub.confirmed:
+        return {"ok": True}
+    t = datetime.now(UTC)
+    if sub:
+        recent = parse(sub.last_sent)
+        day_ago = t - timedelta(days=1)
+        if t - recent < RESEND_WINDOW or (recent > day_ago and sub.sends >= MAX_CONFIRM_SENDS_PER_DAY):
+            return {"ok": True}
+        if recent <= day_ago:
+            sub.sends = 0
+        sub.confirm_token = sub.confirm_token or new_confirm_token()
+    else:
+        sub = Subscriber(email=email, created=now(), source=body.source, confirm_token=new_confirm_token())
+    subject, html_body = mail.confirm_email(f"{settings.site_url}/confirm/?token={sub.confirm_token}")
+    if mail.get_mailer().send(email, subject, html_body):
+        sub.sends, sub.last_sent = sub.sends + 1, now()
     store.put(sub)
-    subject, html_body = mail.confirm_email(f"{settings.site_url}/api/confirm?token={sub.confirm_token}")
-    mail.get_mailer().send([email], subject, html_body)
     return {"ok": True}
 
 
-@app.get("/confirm")
-def confirm(token: str) -> RedirectResponse:
-    """Linked from the confirmation email; the site proxies /api/confirm here."""
+@app.post("/confirm", dependencies=[Depends(require_key)])
+def confirm(body: TokenIn) -> dict[str, Any]:
+    """The site's /confirm/ page posts here after the person clicks the button; a link scanner
+    fetching the URL from the email changes nothing."""
     store = get_store()
-    sub = store.by_confirm_token(token) if token else None
+    sub = store.by_confirm_token(body.token) if body.token else None
     if not sub:
-        return RedirectResponse(f"{settings.site_url}/subscribe/?confirmed=0", status_code=302)
-    sub.confirmed, sub.unsubscribed, sub.confirm_token = True, False, ""
+        return {"ok": False}
+    if sub.confirmed:
+        return {"ok": True, "already": True}
+    sub.confirmed, sub.confirm_token = True, ""
     store.put(sub)
-    subject, html_body = mail.welcome_email(f"{settings.site_url}/unsubscribe/?token={unsubscribe_token(sub.email)}")
-    mail.get_mailer().send([sub.email], subject, html_body)
-    return RedirectResponse(f"{settings.site_url}/subscribe/?confirmed=1", status_code=302)
+    unsub = f"{settings.site_url}/unsubscribe/?token={unsubscribe_token(sub.email)}"
+    subject, html_body = mail.welcome_email(unsub)
+    mail.get_mailer().send(sub.email, subject, html_body, mail.unsubscribe_headers(unsub))
+    return {"ok": True}
 
 
 @app.post("/unsubscribe", dependencies=[Depends(require_key)])
-def unsubscribe(body: TokenIn) -> dict:
+def unsubscribe(body: TokenIn) -> dict[str, Any]:
+    """Deletes the row. Idempotent: a replayed token is a no-op and sends nothing. The answer
+    does not reveal whether the token matched anyone."""
     store = get_store()
-    sub = store.by_unsub_token(body.token)
-    if not sub:
-        raise HTTPException(404, "unknown token")
-    sub.unsubscribed = True
-    store.put(sub)
-    subject, html_body = mail.unsubscribed_email()
-    mail.get_mailer().send([sub.email], subject, html_body)
+    sub = by_unsub_token(store, body.token)
+    if sub:
+        store.delete(sub)
+        subject, html_body = mail.unsubscribed_email()
+        mail.get_mailer().send(sub.email, subject, html_body)
     return {"ok": True}
 
 
-@app.get("/admin/stats", dependencies=[Depends(require_key)])
-def stats() -> dict:
+# --- admin -----------------------------------------------------------------------------------
+
+@app.get("/admin/stats", dependencies=[Depends(require_admin)])
+def stats() -> dict[str, Any]:
     store = get_store()
+    purge_pending(store)
     subs = store.all()
-    live = [s for s in subs if s.confirmed and not s.unsubscribed]
-    recent = sorted(subs, key=lambda s: s.created, reverse=True)[:10]
+    live = sorted((s for s in subs if s.confirmed), key=lambda s: s.created, reverse=True)
     return {
         "subscribers": len(live),
-        "recent": [{"email": s.email, "created": s.created, "confirmed": s.confirmed and not s.unsubscribed} for s in recent],
+        "pending": sum(1 for s in subs if not s.confirmed),
+        "recent": [{"email": s.email, "created": s.created, "confirmed": True} for s in live[:10]],
         "lastEmail": store.last_email(),
     }
 
 
-@app.post("/admin/announce", dependencies=[Depends(require_key)])
-def announce(post: PostIn) -> dict:
+@app.post("/admin/announce", dependencies=[Depends(require_admin)])
+def announce(post: PostIn) -> dict[str, Any]:
+    """One message per confirmed address (each has its own unsubscribe link), sent in batches
+    with an idempotency key per batch. A slug that was already announced is refused unless
+    `force` is set, so a retried click cannot mail everyone twice."""
     store = get_store()
-    live = [s for s in store.all() if s.confirmed and not s.unsubscribed]
-    sent = 0
-    mailer = mail.get_mailer()
-    for s in live:  # one message per address so each unsubscribe link is its own
-        subject, html_body = mail.post_email(post.model_dump(), f"{settings.site_url}/unsubscribe/?token={unsubscribe_token(s.email)}")
-        sent += mailer.send([s.email], subject, html_body)
-    store.log_email(post.title, sent)
-    return {"recipients": sent}
+    if not post.force and store.announced(post.slug):
+        raise HTTPException(409, "already announced; pass force to send again")
+    live = [s for s in store.all() if s.confirmed]
+    messages = []
+    for s in live:
+        unsub = f"{settings.site_url}/unsubscribe/?token={unsubscribe_token(s.email)}"
+        subject, html_body = mail.post_email(post.model_dump(exclude={"force"}), unsub)
+        messages.append(mail.message(s.email, subject, html_body, mail.unsubscribe_headers(unsub)))
+    sent = mail.get_mailer().send_many(messages, idempotency=f"announce/{post.slug}") if messages else 0
+    store.log_email(post.title, sent, slug=post.slug)
+    return {"recipients": sent, "subscribers": len(live)}

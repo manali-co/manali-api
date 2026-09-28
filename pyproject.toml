@@ -26,6 +26,9 @@ packages = ["src/manali_api"]
 target-version = "py312"
 line-length = 140
 
+[tool.ruff.lint.per-file-ignores]
+"src/manali_api/mail.py" = ["E501"]  # inline HTML/CSS for the email templates
+
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 

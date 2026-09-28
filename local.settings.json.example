@@ -3,11 +3,12 @@
   "Values": {
     "FUNCTIONS_WORKER_RUNTIME": "python",
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
-    "MANALI_API_KEY": "change-me",
-    "MANALI_TOKEN_SECRET": "change-me-too",
+    "MANALI_ENV": "local",
+    "MANALI_API_KEY": "change-me-to-32-or-more-characters!!",
+    "MANALI_ADMIN_KEY": "change-me-too-32-or-more-characters!",
+    "MANALI_TOKEN_SECRET": "change-me-as-well-32-or-more-characters",
     "MANALI_SITE_URL": "http://localhost:3000",
     "MANALI_MAIL_FROM": "manali apps <hello@manali.app>",
-    "RESEND_API_KEY": "",
-    "MANALI_TABLES_CONNECTION": "UseDevelopmentStorage=true"
+    "RESEND_API_KEY": ""
   }
 }
