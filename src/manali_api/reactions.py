@@ -82,12 +82,12 @@ class TableReactions:
 
         row_key = f"{client}|{kind}"
         try:
-            self.t.delete_entity(slug, row_key)  # a second tap removes
-        except ResourceNotFoundError:
+            self.t.create_entity({"PartitionKey": slug, "RowKey": row_key})  # first tap: on
+        except ResourceExistsError:
             try:
-                self.t.create_entity({"PartitionKey": slug, "RowKey": row_key})
-            except ResourceExistsError:
-                pass  # two taps raced; the row exists, which is what "on" means
+                self.t.delete_entity(slug, row_key)  # second tap: off
+            except ResourceNotFoundError:
+                pass  # two taps raced and the other one already removed it
         return self.get(slug, client)
 
 
