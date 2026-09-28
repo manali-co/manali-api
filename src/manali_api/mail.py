@@ -21,8 +21,8 @@ E = {
     "font": "Inter, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
     "display": "Comfortaa, Inter, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
 }
-LABELS = {"yapp": "Yapp", "what-should-we-watch": "What Should We Watch", "spark": "Spark", "manali": "manali apps"}
-DOTS = {"yapp": "#E8B79A", "what-should-we-watch": "#EE8079", "spark": "#E03C7A", "manali": "#5B63C7"}
+LABELS = {"yapp": "Yapp", "what-should-we-watch": "What Should We Watch", "spark": "Spark", "portfolio": "Personal Portfolio", "manali": "manali apps"}
+DOTS = {"yapp": "#E8B79A", "what-should-we-watch": "#EE8079", "spark": "#E03C7A", "portfolio": "#D2491F", "manali": "#5B63C7"}
 AVATAR = "https://raw.githubusercontent.com/manali-co/.github/main/brand/png/github-avatar-500.png"
 
 CSS = f"""
