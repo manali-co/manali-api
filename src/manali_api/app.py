@@ -32,6 +32,13 @@ def _same(a: str, b: str) -> bool:
     return bool(a) and bool(b) and hmac.compare_digest(a.encode(), b.encode())
 
 
+def unsubscribe_links(email: str) -> tuple[str, str]:
+    """The page a person clicks (nothing happens until they press the button) and the endpoint a
+    mail client POSTs to for RFC 8058 one-click unsubscribe."""
+    token = unsubscribe_token(email)
+    return f"{settings.site_url}/unsubscribe/?token={token}", f"{settings.site_url}/api/unsubscribe/?token={token}"
+
+
 def ready() -> None:
     if settings.problems:
         raise HTTPException(503, "api not configured: " + "; ".join(settings.problems))
@@ -171,9 +178,9 @@ def confirm(body: TokenIn) -> dict[str, Any]:
         return {"ok": True, "already": True}
     sub.confirmed, sub.confirm_token = True, ""
     store.put(sub)
-    unsub = f"{settings.site_url}/unsubscribe/?token={unsubscribe_token(sub.email)}"
-    subject, html_body = mail.welcome_email(unsub)
-    mail.get_mailer().send(sub.email, subject, html_body, mail.unsubscribe_headers(unsub))
+    page, one_click = unsubscribe_links(sub.email)
+    subject, html_body = mail.welcome_email(page)
+    mail.get_mailer().send(sub.email, subject, html_body, mail.unsubscribe_headers(one_click))
     return {"ok": True}
 
 
@@ -217,9 +224,9 @@ def announce(post: PostIn) -> dict[str, Any]:
     live = [s for s in store.all() if s.confirmed]
     messages = []
     for s in live:
-        unsub = f"{settings.site_url}/unsubscribe/?token={unsubscribe_token(s.email)}"
-        subject, html_body = mail.post_email(post.model_dump(exclude={"force"}), unsub)
-        messages.append(mail.message(s.email, subject, html_body, mail.unsubscribe_headers(unsub)))
+        page, one_click = unsubscribe_links(s.email)
+        subject, html_body = mail.post_email(post.model_dump(exclude={"force"}), page)
+        messages.append(mail.message(s.email, subject, html_body, mail.unsubscribe_headers(one_click)))
     sent = mail.get_mailer().send_many(messages, idempotency=f"announce/{post.slug}") if messages else 0
     store.log_email(post.title, sent, slug=post.slug)
     return {"recipients": sent, "subscribers": len(live)}
