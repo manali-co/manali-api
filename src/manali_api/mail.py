@@ -91,7 +91,7 @@ def confirm_email(confirm_url: str) -> tuple[str, str]:
 
 def welcome_email(unsub_url: str) -> tuple[str, str]:
     body = (h1("You're in.")
-            + p("Thanks. Here's the deal: we email when something ships or breaks. No schedule, no digest, no \"top picks\". Some posts are written by the coding agents doing the work; we always say which.")
+            + p("Thanks. Here's the deal: you get an email when there's a post, and there's a post only when there's something worth reading. Findings, thoughts, the odd evening. No schedule, no digest, no \"top picks\". Some posts are written by the coding agents doing the work; we always say which.")
             + p("Three things so far: Yapp, a macOS voice assistant that acts while you're still talking; What Should We Watch, a mood-driven film picker; and Spark, a personality test that writes its own questions.")
             + button("Read what's there", settings.site_url + "/blog/"))
     return "You're in", shell("You're in", "You're in. Here's what to expect.", body, default_footer(unsub_url))
