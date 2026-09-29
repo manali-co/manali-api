@@ -106,10 +106,16 @@ class ReplyIn(BaseModel):
     email: str = Field(default="", max_length=254)
     title: str = Field(default="", max_length=200)
 
-    @field_validator("text", "name", "title")
+    @field_validator("text")
     @classmethod
     def _strip(cls, v: str) -> str:
         return v.strip()
+
+    @field_validator("name", "title")
+    @classmethod
+    def _one_line(cls, v: str) -> str:
+        # both reach an email subject or header; never let a newline through
+        return re.sub(r"[\r\n\t]+", " ", v).strip()
 
 
 class ReactIn(BaseModel):
