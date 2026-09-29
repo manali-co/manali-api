@@ -122,3 +122,49 @@ def test_reply_quota_holds_under_concurrency() -> None:
         granted = list(ex.map(lambda _: store.take_quota("client-dddddddddddddddd"), range(40)))
     assert granted.count(True) == replies.PER_CLIENT_PER_HOUR
     assert store.take_quota("client-eeeeeeeeeeeeeeee")  # another browser has its own budget
+
+
+def test_series_followers_get_only_their_series() -> None:
+    c = TestClient(app)
+    mailer = mail.get_mailer()
+    follow = {"email": "f@example.com", "series": "evening-builds", "seriesTitle": "Evening builds"}
+    assert c.post("/subscribe", json=follow, headers=H).status_code == 202
+    assert mailer.sent[-1][1] == "Confirm: follow Evening builds"
+    token = store.get_store().get("f@example.com").confirm_token
+    assert c.post("/confirm", json={"token": token}, headers=H).json() == {"ok": True}
+    assert mailer.sent[-1][1] == "You're following Evening builds"
+    assert "/series/evening-builds/" in mailer.sent[-1][2]
+    # an everything subscriber, the way every existing row loads
+    c.post("/subscribe", json={"email": "all@example.com"}, headers=H)
+    c.post("/confirm", json={"token": store.get_store().get("all@example.com").confirm_token}, headers=H)
+
+    post = {"slug": "solo", "title": "Solo", "url": "https://example.test/blog/solo/"}
+    assert c.post("/admin/announce", json=post, headers=A).json()["recipients"] == 1  # not the follower
+    part = {"slug": "part-2", "title": "Part two", "url": "https://example.test/blog/part-2/", "series": "evening-builds", "seriesTitle": "Evening builds"}
+    assert c.post("/admin/announce", json=part, headers=A).json()["recipients"] == 2
+    to_follower = [m for m in mailer.sent if m[0] == ["f@example.com"] and m[1] == "New post: Part two"]
+    assert to_follower and "because you follow Evening builds" in to_follower[0][2]
+    other = {**part, "slug": "else", "series": "another-one", "seriesTitle": "Another"}
+    assert c.post("/admin/announce", json=other, headers=A).json()["recipients"] == 1
+
+    # a confirmed follower following another series: no new opt-in, a note instead
+    n = len(mailer.sent)
+    c.post("/subscribe", json={**follow, "series": "another-one", "seriesTitle": "Another"}, headers=H)
+    assert mailer.sent[-1][1] == "You're following Another" and len(mailer.sent) == n + 1
+    assert store.get_store().get("f@example.com").follows() == ["evening-builds", "another-one"]
+    # and later asking for every post turns that on without mailing again
+    c.post("/subscribe", json={"email": "f@example.com"}, headers=H)
+    assert store.get_store().get("f@example.com").everything is True
+    assert c.post("/subscribe", json={**follow, "series": "Bad Slug"}, headers=H).status_code == 422
+
+
+def test_follow_notes_are_capped_per_day() -> None:
+    c = TestClient(app)
+    mailer = mail.get_mailer()
+    c.post("/subscribe", json={"email": "cap@example.com"}, headers=H)
+    c.post("/confirm", json={"token": store.get_store().get("cap@example.com").confirm_token}, headers=H)
+    for i in range(10):
+        c.post("/subscribe", json={"email": "cap@example.com", "series": f"s-{i}", "seriesTitle": f"S{i}"}, headers=H)
+    notes = [m for m in mailer.sent if m[0] == ["cap@example.com"] and m[1].startswith("You're following")]
+    assert 1 <= len(notes) <= 3
+    assert len(store.get_store().get("cap@example.com").follows()) == 10  # every follow still counts

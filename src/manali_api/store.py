@@ -33,6 +33,23 @@ class Subscriber:
     confirm_token: str = ""
     sends: int = 0  # confirmation emails sent for this address
     last_sent: str = ""
+    everything: bool = True  # every new post; False for someone who only follows series
+    series: str = ""  # comma-separated slugs of the series this address follows
+    series_title: str = ""  # display name of the series most recently followed, for the emails
+
+    def follows(self) -> list[str]:
+        """Followed series slugs, oldest first."""
+        return [x for x in self.series.split(",") if x]
+
+    def follow(self, slug: str, title: str = "") -> None:
+        order = [x for x in self.follows() if x != slug] + [slug]
+        self.series = ",".join(order)
+        if title:
+            self.series_title = title
+
+    def wants(self, series: str | None) -> bool:
+        """Should a new post in `series` (None for a standalone post) reach this address?"""
+        return self.everything or (series is not None and series in self.follows())
 
     def to_row(self) -> dict[str, Any]:
         return {"PartitionKey": "sub", "RowKey": key(self.email), **asdict(self)}
