@@ -91,6 +91,8 @@ def test_reactions_toggle_per_browser() -> None:
     assert c.get("/reactions/hello", headers={**H, "x-client": you}).json()["mine"] == ["sun"]
     assert c.get("/reactions/hello", headers=H).json()["mine"] == []  # no id in the URL, ever
     assert c.post("/reactions/hello", json={"client": me, "kind": "nope"}, headers=H).status_code == 400
+    r = c.post("/reactions/hello", json={"client": me, "kind": "idea"}, headers=H).json()
+    assert r["counts"]["idea"] == 1 and r["mine"] == ["idea"]
     assert c.post("/reactions/Bad Slug", json={"client": me, "kind": "sun"}, headers=H).status_code == 400
 
 
