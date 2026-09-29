@@ -34,6 +34,10 @@ def _same(a: str, b: str) -> bool:
     return bool(a) and bool(b) and hmac.compare_digest(a.encode(), b.encode())
 
 
+def series_url(slug: str) -> str:
+    return f"{settings.site_url}/series/{slug}/"
+
+
 def unsubscribe_links(email: str) -> tuple[str, str]:
     """The page a person clicks (nothing happens until they press the button) and the endpoint a
     mail client POSTs to for RFC 8058 one-click unsubscribe."""
@@ -61,6 +65,22 @@ def require_admin(x_admin_key: str = Header(default=""), _: None = Depends(requi
 class SubscribeIn(BaseModel):
     email: str = Field(max_length=254)
     source: str = Field(default="site", max_length=32)
+    # Set to follow one series instead of every post. The site sends the title from its own
+    # content, never from the visitor, and only for a series slug it knows.
+    series: str | None = Field(default=None, max_length=120)
+    seriesTitle: str = Field(default="", max_length=120)
+
+    @field_validator("series")
+    @classmethod
+    def _series(cls, v: str | None) -> str | None:
+        if v is not None and not SLUG.match(v):
+            raise ValueError("bad series")
+        return v
+
+    @field_validator("seriesTitle")
+    @classmethod
+    def _title(cls, v: str) -> str:
+        return re.sub(r"[\r\n\t]+", " ", v).strip()
 
 
 class TokenIn(BaseModel):
@@ -77,6 +97,8 @@ class PostIn(BaseModel):
     project: str = "manali"
     date: str = Field(default="", max_length=40)
     author: str = Field(default="Manali", max_length=120)
+    series: str | None = Field(default=None, max_length=120)  # followers of this series get it too
+    seriesTitle: str = Field(default="", max_length=120)
     force: bool = False
 
     @field_validator("slug")
@@ -93,7 +115,14 @@ class PostIn(BaseModel):
             raise ValueError("links in email must be https")
         return v
 
-    @field_validator("title", "summary", "author")
+    @field_validator("series")
+    @classmethod
+    def _series(cls, v: str | None) -> str | None:
+        if v is not None and not SLUG.match(v):
+            raise ValueError("bad series")
+        return v
+
+    @field_validator("title", "summary", "author", "seriesTitle")
     @classmethod
     def _one_line(cls, v: str) -> str:
         return re.sub(r"[\r\n\t]+", " ", v).strip()
@@ -195,30 +224,65 @@ def replies_delete(slug: str, reply_id: str) -> dict[str, Any]:
 
 @app.post("/subscribe", status_code=202, dependencies=[Depends(require_key)])
 def subscribe(body: SubscribeIn) -> dict[str, Any]:
-    """Always 202: the response never says whether an address is on the list. A confirmation
-    goes out at most once per ten minutes and three times a day per address, and the token is
-    reused, so a flood of requests cannot bomb an inbox or kill the link in the first email."""
+    """Always 202: the response never says whether an address is on the list. An email goes out
+    at most once per ten minutes and three times a day per address, and the confirm token is
+    reused, so a flood of requests cannot bomb an inbox or kill the link in the first email.
+
+    With `series`, the address follows that one series: it gets an email for a new part and
+    nothing else. A confirmed address following another series needs no new opt-in; it gets a
+    short note instead, so the site's "check your inbox" is always true."""
     email = body.email.strip().lower()
     if not EMAIL.match(email):
         raise HTTPException(400, "invalid email")
     store = get_store()
     sub = store.get(email)
-    if sub and sub.confirmed:
-        return {"ok": True}
     t = datetime.now(UTC)
-    if sub:
-        recent = parse(sub.last_sent)
+
+    def may_send(s: Subscriber, window: bool = True) -> bool:
+        # The ten-minute window protects a pending confirmation link; a follow note has none to
+        # protect, so it only counts toward the daily cap.
+        recent = parse(s.last_sent)
         day_ago = t - timedelta(days=1)
-        if t - recent < RESEND_WINDOW or (recent > day_ago and sub.sends >= MAX_CONFIRM_SENDS_PER_DAY):
-            return {"ok": True}
+        if (window and t - recent < RESEND_WINDOW) or (recent > day_ago and s.sends >= MAX_CONFIRM_SENDS_PER_DAY):
+            return False
         if recent <= day_ago:
-            sub.sends = 0
+            s.sends = 0
+        return True
+
+    def sent(s: Subscriber, ok: int) -> None:
+        if ok:
+            s.sends, s.last_sent = s.sends + 1, now()
+
+    if sub and sub.confirmed:
+        if body.series:
+            if not sub.follow(body.series, body.seriesTitle):
+                return {"ok": True}  # at the follow cap: nothing added, nothing sent, same answer
+            if may_send(sub, window=False):
+                page, one_click = unsubscribe_links(sub.email)
+                subject, html_body = mail.follow_email(body.seriesTitle or "the series", series_url(body.series), sub.everything, page)
+                sent(sub, mail.get_mailer().send(email, subject, html_body, mail.unsubscribe_headers(one_click)))
+            store.put(sub)
+        elif not sub.everything:
+            sub.everything = True  # a series follower who now wants every post
+            store.put(sub)
+        return {"ok": True}
+
+    if sub:
+        if body.series:
+            sub.follow(body.series, body.seriesTitle)
+        else:
+            sub.everything = True
+        if not may_send(sub):
+            store.put(sub)
+            return {"ok": True}
         sub.confirm_token = sub.confirm_token or new_confirm_token()
     else:
-        sub = Subscriber(email=email, created=now(), source=body.source, confirm_token=new_confirm_token())
-    subject, html_body = mail.confirm_email(f"{settings.site_url}/confirm/?token={sub.confirm_token}")
-    if mail.get_mailer().send(email, subject, html_body):
-        sub.sends, sub.last_sent = sub.sends + 1, now()
+        sub = Subscriber(email=email, created=now(), source=body.source, confirm_token=new_confirm_token(), everything=not body.series)
+        if body.series:
+            sub.follow(body.series, body.seriesTitle)
+    title = "" if sub.everything else (sub.series_title or "the series")
+    subject, html_body = mail.confirm_email(f"{settings.site_url}/confirm/?token={sub.confirm_token}", title)
+    sent(sub, mail.get_mailer().send(email, subject, html_body))
     store.put(sub)
     return {"ok": True}
 
@@ -236,7 +300,11 @@ def confirm(body: TokenIn) -> dict[str, Any]:
     sub.confirmed, sub.confirm_token = True, ""
     store.put(sub)
     page, one_click = unsubscribe_links(sub.email)
-    subject, html_body = mail.welcome_email(page)
+    if sub.everything:
+        subject, html_body = mail.welcome_email(page)
+    else:
+        latest = sub.follows()[-1] if sub.follows() else ""
+        subject, html_body = mail.welcome_email(page, sub.series_title or "the series", series_url(latest) if latest else "")
     mail.get_mailer().send(sub.email, subject, html_body, mail.unsubscribe_headers(one_click))
     return {"ok": True}
 
@@ -278,11 +346,12 @@ def announce(post: PostIn) -> dict[str, Any]:
     store = get_store()
     if not post.force and store.announced(post.slug):
         raise HTTPException(409, "already announced; pass force to send again")
-    live = [s for s in store.all() if s.confirmed]
+    live = [s for s in store.all() if s.confirmed and s.wants(post.series)]
     messages = []
     for s in live:
         page, one_click = unsubscribe_links(s.email)
-        subject, html_body = mail.post_email(post.model_dump(exclude={"force"}), page)
+        reason = f"You got this because you follow {post.seriesTitle or 'this series'} at manali apps." if not s.everything else ""
+        subject, html_body = mail.post_email(post.model_dump(exclude={"force", "series", "seriesTitle"}), page, reason)
         messages.append(mail.message(s.email, subject, html_body, mail.unsubscribe_headers(one_click)))
     sent = mail.get_mailer().send_many(messages, idempotency=f"announce/{post.slug}") if messages else 0
     store.log_email(post.title, sent, slug=post.slug)

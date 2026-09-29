@@ -24,6 +24,9 @@ def key(email: str) -> str:
     return hashlib.sha256(email.strip().lower().encode()).hexdigest()[:32]
 
 
+MAX_FOLLOWS = 50  # 50 slugs of up to 120 characters stay far below one property's 64 KiB
+
+
 @dataclass
 class Subscriber:
     email: str
@@ -33,6 +36,29 @@ class Subscriber:
     confirm_token: str = ""
     sends: int = 0  # confirmation emails sent for this address
     last_sent: str = ""
+    everything: bool = True  # every new post; False for someone who only follows series
+    series: str = ""  # comma-separated slugs of the series this address follows
+    series_title: str = ""  # display name of the series most recently followed, for the emails
+
+    def follows(self) -> list[str]:
+        """Followed series slugs, oldest first."""
+        return [x for x in self.series.split(",") if x]
+
+    def follow(self, slug: str, title: str = "") -> bool:
+        """Add a followed series. Returns False, changing nothing, once the address already follows
+        MAX_FOLLOWS others: the list is one Table Storage string, capped at 64 KiB, and existing
+        follows are never dropped to make room."""
+        current = self.follows()
+        if slug not in current and len(current) >= MAX_FOLLOWS:
+            return False
+        self.series = ",".join([x for x in current if x != slug] + [slug])
+        if title:
+            self.series_title = title
+        return True
+
+    def wants(self, series: str | None) -> bool:
+        """Should a new post in `series` (None for a standalone post) reach this address?"""
+        return self.everything or (series is not None and series in self.follows())
 
     def to_row(self) -> dict[str, Any]:
         return {"PartitionKey": "sub", "RowKey": key(self.email), **asdict(self)}

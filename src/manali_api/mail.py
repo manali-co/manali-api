@@ -82,14 +82,34 @@ def default_footer(unsub_url: str, reason: str = "You got this because you subsc
     return f'{esc(reason)} <a href="{esc(unsub_url)}" style="color:{E["ink3"]}">Unsubscribe</a> in one click.{addr}'
 
 
-def confirm_email(confirm_url: str) -> tuple[str, str]:
+def confirm_email(confirm_url: str, series_title: str = "") -> tuple[str, str]:
+    if series_title:
+        body = (h1(f"Follow {series_title}?")
+                + p(f"Someone, probably you, asked for an email when the next part of {series_title} goes up on manali apps. One click and it's set. Nothing else gets sent.")
+                + button("Yes, that was me", confirm_url))
+        return f"Confirm: follow {series_title}", shell("Confirm your follow", "One click and the next part comes to you.", body, "If you didn't ask for this, ignore it and nothing happens.")
     body = (h1("Confirm your subscription")
             + p("Someone, probably you, asked for new posts from manali apps by email. One click and you're in.")
             + button("Yes, that was me", confirm_url))
     return "Confirm your subscription", shell("Confirm your subscription", "One click and you're in.", body, "If you didn't ask for this, ignore it and nothing happens.")
 
 
-def welcome_email(unsub_url: str) -> tuple[str, str]:
+def follow_email(series_title: str, series_url: str, everything: bool, unsub_url: str) -> tuple[str, str]:
+    """For an address that is already confirmed: following one more series needs no new opt-in,
+    but the inbox still hears about it, so the site's "check your inbox" is always true."""
+    line = ("You already get every new post, so nothing changes. This just notes that you asked."
+            if everything else "The next part comes to your inbox the day it goes up. Nothing else.")
+    body = h1(f"You're following {series_title}.") + p(line) + button("See every part", series_url)
+    return f"You're following {series_title}", shell("You're following a series", line, body, default_footer(unsub_url))
+
+
+def welcome_email(unsub_url: str, series_title: str = "", series_url: str = "") -> tuple[str, str]:
+    if series_title:
+        body = (h1(f"You're following {series_title}.")
+                + p("The next part comes to your inbox the day it goes up. Nothing else, and one click to stop.")
+                + button("See every part", series_url or settings.site_url + "/blog/"))
+        reason = f"You got this because you followed {series_title} at manali apps."
+        return f"You're following {series_title}", shell("You're following a series", "The next part comes to you.", body, default_footer(unsub_url, reason))
     body = (h1("You're in.")
             + p("Thanks. Here's the deal: you get an email when there's a post, and there's a post only when there's something worth reading. Findings, thoughts, the odd evening. No schedule, no digest, no \"top picks\". Some posts are written by the coding agents doing the work; we always say which.")
             + p("Three things so far: Yapp, a macOS voice assistant that acts while you're still talking; What Should We Watch, a mood-driven film picker; and Spark, a personality test that writes its own questions.")
@@ -97,7 +117,7 @@ def welcome_email(unsub_url: str) -> tuple[str, str]:
     return "You're in", shell("You're in", "You're in. Here's what to expect.", body, default_footer(unsub_url))
 
 
-def post_email(post: dict[str, Any], unsub_url: str) -> tuple[str, str]:
+def post_email(post: dict[str, Any], unsub_url: str, reason: str = "") -> tuple[str, str]:
     project = post.get("project") or "manali"
     dot = DOTS.get(project, E["indigo"])
     if post.get("cover"):
@@ -113,7 +133,8 @@ def post_email(post: dict[str, Any], unsub_url: str) -> tuple[str, str]:
         byline += " · " + post["date"]
     body = (hero + kicker + h1(post["title"]) + p(post.get("summary", ""), muted=True)
             + p(byline, muted=True, small=True, margin="0 0 24px") + button("Read it", post["url"]))
-    return f"New post: {post['title']}", shell(post["title"], post.get("summary", ""), body, default_footer(unsub_url))
+    footer = default_footer(unsub_url, reason) if reason else default_footer(unsub_url)
+    return f"New post: {post['title']}", shell(post["title"], post.get("summary", ""), body, footer)
 
 
 def reply_notice(post_title: str, post_url: str, text: str, name: str, email: str, admin_url: str) -> tuple[str, str]:
