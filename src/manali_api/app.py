@@ -255,7 +255,8 @@ def subscribe(body: SubscribeIn) -> dict[str, Any]:
 
     if sub and sub.confirmed:
         if body.series:
-            sub.follow(body.series, body.seriesTitle)
+            if not sub.follow(body.series, body.seriesTitle):
+                return {"ok": True}  # at the follow cap: nothing added, nothing sent, same answer
             if may_send(sub, window=False):
                 page, one_click = unsubscribe_links(sub.email)
                 subject, html_body = mail.follow_email(body.seriesTitle or "the series", series_url(body.series), sub.everything, page)

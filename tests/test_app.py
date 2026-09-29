@@ -168,3 +168,17 @@ def test_follow_notes_are_capped_per_day() -> None:
     notes = [m for m in mailer.sent if m[0] == ["cap@example.com"] and m[1].startswith("You're following")]
     assert 1 <= len(notes) <= 3
     assert len(store.get_store().get("cap@example.com").follows()) == 10  # every follow still counts
+
+
+def test_follows_are_capped_without_dropping_old_ones() -> None:
+    c = TestClient(app)
+    c.post("/subscribe", json={"email": "many@example.com"}, headers=H)
+    c.post("/confirm", json={"token": store.get_store().get("many@example.com").confirm_token}, headers=H)
+    long = "s" * 110
+    for i in range(60):
+        r = c.post("/subscribe", json={"email": "many@example.com", "series": f"{long}-{i}", "seriesTitle": "S"}, headers=H)
+        assert r.status_code == 202
+    follows = store.get_store().get("many@example.com").follows()
+    assert len(follows) == store.MAX_FOLLOWS
+    assert follows[0] == f"{long}-0" and follows[-1] == f"{long}-{store.MAX_FOLLOWS - 1}"
+    assert len(",".join(follows)) < 32_000  # well inside one Table Storage property
