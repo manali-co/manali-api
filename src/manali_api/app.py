@@ -352,9 +352,8 @@ def comment_notify(slug: str, cid: str, body: ClientIn) -> dict[str, Any]:
         raise HTTPException(404, "no such comment")
     if body.notify and not c.email:
         raise HTTPException(400, "no email")
-    c.notify = bool(body.notify)
-    store.put(c)
-    return {"notify": c.notify}
+    store.update(slug, cid, notify=bool(body.notify))
+    return {"notify": bool(body.notify)}
 
 
 class StopIn(BaseModel):
@@ -366,12 +365,13 @@ class StopIn(BaseModel):
 @app.post("/comment-emails/stop", dependencies=[Depends(require_key)])  # own path: a post slug could be "stop"
 def comment_stop(body: StopIn) -> dict[str, Any]:
     """From the stop link in a reply email. Always ok: it never says whether the token matched."""
-    if SLUG.match(body.post) and CID.match(body.id) and hmac.compare_digest(body.token, comment_stop_token(body.post, body.id)):
+    # Compare bytes: compare_digest raises on non-ASCII str, and a tampered link must not 500.
+    valid = hmac.compare_digest(body.token.encode(), comment_stop_token(body.post, body.id).encode())
+    if SLUG.match(body.post) and CID.match(body.id) and valid:
         store = get_comments()
         c = store.get(body.post, body.id)
         if c and c.notify:
-            c.notify = False
-            store.put(c)
+            store.update(body.post, body.id, notify=False)
     return {"ok": True}
 
 
@@ -392,13 +392,13 @@ def moderate_comment(slug: str, cid: str, action: str) -> dict[str, Any]:
         raise HTTPException(404, "no such comment")
     if action == "approve" and c.state == "pending":
         c.state = "live"
-        store.put(c)
+        store.update(slug, cid, state="live")
         if c.seed:
             store.trust(c.seed)
         notify_parent(c)
     elif action == "remove":
         c.state = "removed"
-        store.put(c)
+        store.update(slug, cid, state="removed")
     return {"ok": True, "state": c.state}
 
 

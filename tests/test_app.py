@@ -221,6 +221,7 @@ def test_comments_moderation_threads_loves_and_privacy() -> None:
     from urllib.parse import parse_qs, urlparse
     q = {k: v[0] for k, v in parse_qs(urlparse(stop_url.replace("&amp;", "&")).query).items()}
     assert c.post("/comment-emails/stop", json={"post": q["post"], "id": q["id"], "token": "wrong" * 5}, headers=H).json() == {"ok": True}
+    assert c.post("/comment-emails/stop", json={**q, "token": "é" * 32}, headers=H).json() == {"ok": True}  # no 500
     assert c.post("/comment-emails/stop", json=q, headers=H).json() == {"ok": True}
     assert c.get("/comments/hello", headers={**H, "x-client": a}).json()["comments"][0]["notify"] is False
     # only the author can switch reply emails; a comment without an email can't turn them on

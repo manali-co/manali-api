@@ -61,6 +61,7 @@ class CommentStore(Protocol):
     def add(self, c: Comment) -> Comment: ...
     def get(self, slug: str, cid: str) -> Comment | None: ...
     def put(self, c: Comment) -> None: ...
+    def update(self, slug: str, cid: str, **changes: Any) -> None: ...
     def for_post(self, slug: str) -> list[Comment]: ...
     def recent(self, limit: int = 100) -> list[Comment]: ...
     def trusted(self, seed: str) -> bool: ...
@@ -86,6 +87,12 @@ class MemoryComments:
 
     def put(self, c: Comment) -> None:
         self.rows[(c.slug, c.id)] = c
+
+    def update(self, slug: str, cid: str, **changes: Any) -> None:
+        c = self.rows.get((slug, cid))
+        if c:
+            for k, v in changes.items():
+                setattr(c, k, v)
 
     def for_post(self, slug: str) -> list[Comment]:
         return sorted((c for (s, _), c in self.rows.items() if s == slug), key=lambda c: c.id)
@@ -159,8 +166,16 @@ class TableComments:
             return None
 
     def put(self, c: Comment) -> None:
+        """Whole-entity write: only for a new comment. Changes to an existing one go through
+        update, which writes just the named fields, so it can't undo a concurrent love or
+        moderation change."""
         row = {"PartitionKey": c.slug, "RowKey": c.id, **{k: v for k, v in asdict(c).items() if k not in ("slug", "id")}}
         self.t.upsert_entity(row)
+
+    def update(self, slug: str, cid: str, **changes: Any) -> None:
+        from azure.data.tables import UpdateMode
+
+        self.t.update_entity({"PartitionKey": slug, "RowKey": cid, **changes}, mode=UpdateMode.MERGE)
 
     def for_post(self, slug: str) -> list[Comment]:
         return [self._from(r) for r in self.t.query_entities("PartitionKey eq @s", parameters={"s": slug})]
@@ -196,13 +211,15 @@ class TableComments:
         """Counter updated with an ETag match, so two loves at once can't overwrite each other."""
         from azure.core import MatchConditions
         from azure.core.exceptions import HttpResponseError
+        from azure.data.tables import UpdateMode
 
         for _ in range(5):
             row = self.t.get_entity(slug, cid)
-            row["loves"] = max(0, int(row.get("loves", 0)) + delta)
+            loves = max(0, int(row.get("loves", 0)) + delta)
             try:
-                self.t.update_entity(row, etag=row.metadata["etag"], match_condition=MatchConditions.IfNotModified)
-                return int(row["loves"])
+                self.t.update_entity({"PartitionKey": slug, "RowKey": cid, "loves": loves}, mode=UpdateMode.MERGE,
+                                     etag=row.metadata["etag"], match_condition=MatchConditions.IfNotModified)
+                return loves
             except HttpResponseError as e:
                 if getattr(e, "status_code", None) == 412:
                     continue
