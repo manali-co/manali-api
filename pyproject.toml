@@ -28,6 +28,8 @@ line-length = 140
 
 [tool.ruff.lint.per-file-ignores]
 "src/manali_api/mail.py" = ["E501"]  # inline HTML/CSS for the email templates
+"src/manali_api/replies.py" = ["E501"]
+"tests/*" = ["E501"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

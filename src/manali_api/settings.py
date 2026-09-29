@@ -25,6 +25,8 @@ class Settings:
     tables_endpoint: str = field(default_factory=lambda: _env("MANALI_TABLES_ENDPOINT"))
     tables_connection: str = field(default_factory=lambda: _env("MANALI_TABLES_CONNECTION"))
     token_secret: str = field(default_factory=lambda: _env("MANALI_TOKEN_SECRET"))
+    # Where reply notifications go (the owner). Empty means replies are stored but nobody is emailed.
+    notify_email: str = field(default_factory=lambda: _env("MANALI_NOTIFY_EMAIL"))
     # Optional postal line for the email footer (some jurisdictions expect one for list mail).
     mail_address: str = field(default_factory=lambda: _env("MANALI_MAIL_ADDRESS"))
 
