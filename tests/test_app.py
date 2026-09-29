@@ -9,7 +9,7 @@ os.environ["MANALI_NOTIFY_EMAIL"] = "owner@example.test"
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from manali_api import mail, reactions, replies, store  # noqa: E402
+from manali_api import comments, mail, reactions, replies, store  # noqa: E402
 from manali_api.app import app  # noqa: E402
 
 H = {"x-api-key": os.environ["MANALI_API_KEY"]}
@@ -21,6 +21,7 @@ def setup_function() -> None:
     mail._mailer = mail.MemoryMailer()
     reactions._store = reactions.MemoryReactions()
     replies._store = replies.MemoryReplies()
+    comments._store = comments.MemoryComments()
 
 
 def test_subscribe_confirm_announce_unsubscribe() -> None:
@@ -184,3 +185,63 @@ def test_follows_are_capped_without_dropping_old_ones() -> None:
     assert len(follows) == store.MAX_FOLLOWS
     assert follows[0] == f"{long}-0" and follows[-1] == f"{long}-{store.MAX_FOLLOWS - 1}"
     assert len(",".join(follows)) < 32_000  # well inside one Table Storage property
+
+
+
+def test_comments_moderation_threads_loves_and_privacy() -> None:
+    c = TestClient(app)
+    mailer = mail.get_mailer()
+    a, b = "client-aaaaaaaaaaaaaaaa", "client-bbbbbbbbbbbbbbbb"
+    first = {"client": a, "text": "  First!  ", "email": "A@Example.com", "notify": True, "title": "Hello"}
+    r = c.post("/comments/hello", json=first, headers=H).json()
+    assert r["state"] == "pending"
+    assert mailer.sent[-1][0] == ["owner@example.test"] and mailer.sent[-1][1].startswith("Waiting")
+    # held: only its author sees it, and nobody ever sees the email or the raw client id
+    assert c.get("/comments/hello", headers=H).json()["comments"] == []
+    mine = c.get("/comments/hello", headers={**H, "x-client": a}).json()
+    assert mine["comments"][0]["state"] == "pending" and mine["comments"][0]["mine"] is True
+    assert "email" not in str(mine) and a not in str(mine) and mine["you"]["trusted"] is False
+    # approving trusts the browser: its next comment is live at once
+    assert c.post(f"/admin/comments/hello/{r['id']}/approve", headers=H).status_code == 401
+    assert c.post(f"/admin/comments/hello/{r['id']}/approve", headers=A).json()["state"] == "live"
+    second = c.post("/comments/hello", json={"client": a, "text": "Second"}, headers=H).json()
+    assert second["state"] == "live"
+    # a trusted reader replies to a reply: it joins the top-level thread and emails the parent's author
+    c.post(f"/admin/comments/hello/{r['id']}/approve", headers=A)
+    reply = c.post("/admin/comments/hello", json={"text": "Thanks", "parent": r["id"], "title": "Hello"}, headers=A).json()
+    assert mailer.sent[-1][0] == ["a@example.com"] and "replied to your comment" in mailer.sent[-1][2]
+    stop_url = [x for x in mailer.sent[-1][2].split('"') if "/comments/stop/" in x][0]
+    b_first = c.post("/comments/hello", json={"client": b, "text": "Me too", "parent": reply["id"]}, headers=H).json()
+    c.post(f"/admin/comments/hello/{b_first['id']}/approve", headers=A)
+    thread = c.get("/comments/hello", headers=H).json()["comments"]
+    assert {x["parent"] for x in thread if x["id"] in (reply["id"], b_first["id"])} == {r["id"]}
+    owner = next(x for x in thread if x["id"] == reply["id"])
+    assert owner["owner"] is True and owner["seed"] == ""
+    # the stop link turns the author's reply emails off
+    from urllib.parse import parse_qs, urlparse
+    q = {k: v[0] for k, v in parse_qs(urlparse(stop_url.replace("&amp;", "&")).query).items()}
+    assert c.post("/comment-emails/stop", json={"post": q["post"], "id": q["id"], "token": "wrong" * 5}, headers=H).json() == {"ok": True}
+    assert c.post("/comment-emails/stop", json=q, headers=H).json() == {"ok": True}
+    assert c.get("/comments/hello", headers={**H, "x-client": a}).json()["comments"][0]["notify"] is False
+    # only the author can switch reply emails; a comment without an email can't turn them on
+    assert c.post(f"/comments/hello/{r['id']}/notify", json={"client": b, "notify": True}, headers=H).status_code == 404
+    assert c.post(f"/comments/hello/{second['id']}/notify", json={"client": a, "notify": True}, headers=H).status_code == 400
+    # loves toggle per browser
+    assert c.post(f"/comments/hello/{second['id']}/love", json={"client": b}, headers=H).json() == {"loves": 1, "loved": True}
+    assert c.post(f"/comments/hello/{second['id']}/love", json={"client": b}, headers=H).json() == {"loves": 0, "loved": False}
+    # removed comments keep a placeholder without the text
+    c.post(f"/admin/comments/hello/{second['id']}/remove", headers=A)
+    gone = next(x for x in c.get("/comments/hello", headers=H).json()["comments"] if x["id"] == second["id"])
+    assert gone == {"id": second["id"], "parent": "", "state": "removed", "created": gone["created"]}
+    # names that would pass as the owner are refused; admin listing needs the admin key
+    assert c.post("/comments/hello", json={"client": b, "text": "hi", "name": "Ayush (real)"}, headers=H).status_code == 400
+    assert c.get("/admin/comments", headers=H).status_code == 401
+    assert any(x.get("email") == "a@example.com" for x in c.get("/admin/comments", headers=A).json()["comments"])
+
+
+def test_comments_share_the_reply_rate_limit() -> None:
+    c = TestClient(app)
+    me = "client-cccccccccccccccc"
+    codes = [c.post("/comments/hello", json={"client": me, "text": f"n{i}"}, headers=H).status_code for i in range(6)]
+    assert codes[:5] == [202] * 5 and codes[5] == 429
+    assert c.post("/comments/hello", json={"client": me, "text": "x", "parent": "nope"}, headers=H).status_code == 400

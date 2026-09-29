@@ -149,6 +149,29 @@ def reply_notice(post_title: str, post_url: str, text: str, name: str, email: st
     return f"Reply on “{post_title}”", shell("New reply", f"{who}: {text[:80]}", body, footer)
 
 
+def _quote(text: str) -> str:
+    return (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px"><tr>'
+            f'<td class="ma-quote ma-text" style="background:{E["paper"]};border-left:3px solid {E["gold"]};border-radius:0 12px 12px 0;padding:16px 20px;font-size:16px;line-height:1.6;color:{E["ink"]};white-space:pre-wrap">{esc(text)}</td></tr></table>')
+
+
+def comment_notice(post_title: str, post_url: str, text: str, who: str, held: bool, admin_url: str) -> tuple[str, str]:
+    """To the owner: a new public comment. Held ones say so and point at the admin page."""
+    head = f"{who} commented on “{post_title}”"
+    line = ("It's waiting for you: first comments from a new browser need your approval before anyone else sees them."
+            if held else "It's live on the post.")
+    body = h1(head) + p(line, muted=True, small=True) + _quote(text) + button("Approve or remove" if held else "Open the post", admin_url if held else post_url)
+    footer = f'Every comment is on <a href="{esc(admin_url)}" style="color:{E["ink3"]}">your admin page</a>.'
+    return (f"Waiting: comment on “{post_title}”" if held else f"Comment on “{post_title}”"), shell("New comment", f"{who}: {text[:80]}", body, footer)
+
+
+def comment_reply_email(post_title: str, post_url: str, who: str, text: str, stop_url: str) -> tuple[str, str]:
+    """To a commenter who asked for it: someone replied to their comment."""
+    body = h1(f"{who} replied to your comment") + p(f"On “{post_title}”.", muted=True, small=True) + _quote(text) + button("Read the thread", post_url)
+    footer = (f'You got this because you asked for replies to your comment by email. '
+              f'<a href="{esc(stop_url)}" style="color:{E["ink3"]}">Stop these emails</a> in one click.')
+    return f"New reply on “{post_title}”", shell("New reply", f"{who}: {text[:80]}", body, footer)
+
+
 def unsubscribed_email() -> tuple[str, str]:
     body = (h1("You're unsubscribed.")
             + p(f'Done. No more email from us. The posts stay on the site if you ever want them, and you can <a href="{esc(settings.site_url)}/subscribe/">subscribe again</a> any time. We won\'t mention this.', raw=True))
