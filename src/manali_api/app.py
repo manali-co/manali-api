@@ -16,6 +16,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from . import mail
+from .comments import MAX_TEXT as COMMENT_MAX
+from .comments import RESERVED, Comment, get_comments, seed_of
 from .reactions import CLIENT, KINDS, SLUG, get_reactions
 from .replies import MAX_TEXT, Reply, get_replies
 from .replies import now_iso as reply_now
@@ -147,6 +149,37 @@ class ReplyIn(BaseModel):
         return re.sub(r"[\r\n\t]+", " ", v).strip()
 
 
+class CommentIn(BaseModel):
+    client: str = Field(max_length=64)
+    text: str = Field(min_length=1, max_length=COMMENT_MAX)
+    name: str = Field(default="", max_length=40)
+    email: str = Field(default="", max_length=254)
+    notify: bool = False
+    parent: str = Field(default="", max_length=40)
+    title: str = Field(default="", max_length=200)
+
+    @field_validator("text")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        return v.strip()
+
+    @field_validator("name", "title")
+    @classmethod
+    def _one_line(cls, v: str) -> str:
+        return re.sub(r"[\r\n\t]+", " ", v).strip()
+
+
+class ClientIn(BaseModel):
+    client: str = Field(max_length=64)
+    notify: bool | None = None
+
+
+class OwnerCommentIn(BaseModel):
+    text: str = Field(min_length=1, max_length=COMMENT_MAX)
+    parent: str = Field(default="", max_length=40)
+    title: str = Field(default="", max_length=200)
+
+
 class ReactIn(BaseModel):
     client: str = Field(max_length=64)
     kind: str = Field(max_length=16)
@@ -207,6 +240,184 @@ def reply(slug: str, body: ReplyIn) -> dict[str, Any]:
             m["reply_to"] = r.email
         mail.get_mailer().send_many([m])
     return {"ok": True}
+
+
+# --- public comments ----------------------------------------------------------------------
+
+CID = re.compile(r"^\d{13}-[0-9a-f]{6}$")
+
+
+def comment_stop_token(slug: str, cid: str) -> str:
+    return hmac.new(settings.token_secret.encode(), f"stop:{slug}:{cid}".encode(), "sha256").hexdigest()[:32]
+
+
+def public_comment(c: Comment, me: str, loved: set[str]) -> dict[str, Any]:
+    """What anyone may see. Never the email or the raw client id; pending only to its author."""
+    if c.state == "removed":
+        return {"id": c.id, "parent": c.parent, "state": "removed", "created": c.created}
+    mine = bool(me) and not c.owner and c.seed == me
+    out: dict[str, Any] = {"id": c.id, "parent": c.parent, "state": c.state, "created": c.created, "text": c.text,
+                           "name": c.name, "owner": c.owner, "seed": "" if c.owner else c.seed, "loves": c.loves,
+                           "loved": c.id in loved, "mine": mine}
+    if mine:
+        out["notify"] = c.notify
+        out["canNotify"] = bool(c.email)
+    return out
+
+
+def notify_parent(c: Comment) -> None:
+    """A reply just became visible: tell the parent's author if they asked, unless it's their own."""
+    if not c.parent:
+        return
+    parent = get_comments().get(c.slug, c.parent)
+    if not parent or parent.state != "live" or not parent.notify or not parent.email:
+        return
+    if parent.seed and parent.seed == c.seed:  # replying to yourself sends nothing
+        return
+    who = "Ayush" if c.owner else (c.name or "A reader")
+    stop = f"{settings.site_url}/comments/stop/?post={c.slug}&id={parent.id}&token={comment_stop_token(c.slug, parent.id)}"
+    thread = f"{settings.site_url}/blog/{c.slug}/#comments"
+    subject, html_body = mail.comment_reply_email(c.title or parent.title or c.slug, thread, who, c.text, stop)
+    mail.get_mailer().send(parent.email, subject, html_body)
+
+
+@app.get("/comments/{slug}", dependencies=[Depends(require_key)])
+def list_comments(slug: str, x_client: str = Header(default="")) -> dict[str, Any]:
+    if not SLUG.match(slug):
+        raise HTTPException(400, "bad slug")
+    me = seed_of(x_client) if CLIENT.match(x_client) else ""
+    store = get_comments()
+    rows = [c for c in store.for_post(slug) if c.state != "pending" or (me and c.seed == me)]
+    loved = store.loved_by(me, [c.id for c in rows]) if me else set()
+    return {"comments": [public_comment(c, me, loved) for c in rows], "you": {"seed": me, "trusted": bool(me) and store.trusted(me)}}
+
+
+@app.post("/comments/{slug}", status_code=202, dependencies=[Depends(require_key)])
+def post_comment(slug: str, body: CommentIn) -> dict[str, Any]:
+    """A public comment or a one-level reply. The first comment from a browser waits for the
+    owner; after one is approved, that browser posts straight away. Rate-limited per browser,
+    sharing the reply box's budget."""
+    if not SLUG.match(slug) or not CLIENT.match(body.client) or not body.text:
+        raise HTTPException(400, "bad request")
+    if body.name and RESERVED.search(body.name):
+        raise HTTPException(400, "name reserved")
+    email = body.email.strip().lower()
+    if email and not EMAIL.match(email):
+        raise HTTPException(400, "invalid email")
+    store = get_comments()
+    parent = ""
+    if body.parent:
+        if not CID.match(body.parent):
+            raise HTTPException(400, "bad parent")
+        p = store.get(slug, body.parent)
+        if not p or p.state == "removed":
+            raise HTTPException(400, "bad parent")
+        parent = p.parent or p.id  # a reply to a reply joins the same thread
+    if not get_replies().take_quota(body.client):
+        raise HTTPException(429, "slow down")
+    seed = seed_of(body.client)
+    state = "live" if store.trusted(seed) else "pending"
+    c = store.add(Comment(slug=slug, text=body.text, created=reply_now(), seed=seed, state=state, parent=parent,
+                          name=body.name, email=email, notify=bool(body.notify and email), title=body.title))
+    if settings.notify_email:
+        subject, html_body = mail.comment_notice(body.title or slug, f"{settings.site_url}/blog/{slug}/#comments", c.text,
+                                                 c.name or "A reader", state == "pending", f"{settings.site_url}/admin/")
+        mail.get_mailer().send(settings.notify_email, subject, html_body)
+    if state == "live":
+        notify_parent(c)
+    return {"ok": True, "id": c.id, "state": state}
+
+
+@app.post("/comments/{slug}/{cid}/love", dependencies=[Depends(require_key)])
+def love_comment(slug: str, cid: str, body: ClientIn) -> dict[str, Any]:
+    if not SLUG.match(slug) or not CID.match(cid) or not CLIENT.match(body.client):
+        raise HTTPException(400, "bad request")
+    store = get_comments()
+    c = store.get(slug, cid)
+    if not c or c.state != "live":
+        raise HTTPException(404, "no such comment")
+    loved = store.toggle_love(cid, seed_of(body.client))
+    return {"loves": store.bump_loves(slug, cid, 1 if loved else -1), "loved": loved}
+
+
+@app.post("/comments/{slug}/{cid}/notify", dependencies=[Depends(require_key)])
+def comment_notify(slug: str, cid: str, body: ClientIn) -> dict[str, Any]:
+    """The author of a comment turns reply emails on or off. Only works for the browser that wrote
+    it, and only if it left an email."""
+    if not SLUG.match(slug) or not CID.match(cid) or not CLIENT.match(body.client) or body.notify is None:
+        raise HTTPException(400, "bad request")
+    store = get_comments()
+    c = store.get(slug, cid)
+    if not c or c.owner or c.seed != seed_of(body.client):
+        raise HTTPException(404, "no such comment")
+    if body.notify and not c.email:
+        raise HTTPException(400, "no email")
+    store.update(slug, cid, notify=bool(body.notify))
+    return {"notify": bool(body.notify)}
+
+
+class StopIn(BaseModel):
+    post: str = Field(max_length=121)
+    id: str = Field(max_length=40)
+    token: str = Field(max_length=64)
+
+
+@app.post("/comment-emails/stop", dependencies=[Depends(require_key)])  # own path: a post slug could be "stop"
+def comment_stop(body: StopIn) -> dict[str, Any]:
+    """From the stop link in a reply email. Always ok: it never says whether the token matched."""
+    # Compare bytes: compare_digest raises on non-ASCII str, and a tampered link must not 500.
+    valid = hmac.compare_digest(body.token.encode(), comment_stop_token(body.post, body.id).encode())
+    if SLUG.match(body.post) and CID.match(body.id) and valid:
+        store = get_comments()
+        c = store.get(body.post, body.id)
+        if c and c.notify:
+            store.update(body.post, body.id, notify=False)
+    return {"ok": True}
+
+
+@app.get("/admin/comments", dependencies=[Depends(require_admin)])
+def admin_comments() -> dict[str, Any]:
+    rows = get_comments().recent(100)
+    return {"comments": [{**public_comment(c, "", set()), "state": c.state, "text": c.text, "name": c.name, "email": c.email,
+                          "slug": c.slug, "title": c.title} for c in rows]}
+
+
+@app.post("/admin/comments/{slug}/{cid}/{action}", dependencies=[Depends(require_admin)])
+def moderate_comment(slug: str, cid: str, action: str) -> dict[str, Any]:
+    if not SLUG.match(slug) or not CID.match(cid) or action not in ("approve", "remove"):
+        raise HTTPException(400, "bad request")
+    store = get_comments()
+    c = store.get(slug, cid)
+    if not c:
+        raise HTTPException(404, "no such comment")
+    if action == "approve" and c.state == "pending":
+        c.state = "live"
+        store.update(slug, cid, state="live")
+        if c.seed:
+            store.trust(c.seed)
+        notify_parent(c)
+    elif action == "remove":
+        c.state = "removed"
+        store.update(slug, cid, state="removed")
+    return {"ok": True, "state": c.state}
+
+
+@app.post("/admin/comments/{slug}", status_code=202, dependencies=[Depends(require_admin)])
+def owner_comment(slug: str, body: OwnerCommentIn) -> dict[str, Any]:
+    """The owner comments or replies as the author: live at once, marked Author on the site."""
+    if not SLUG.match(slug):
+        raise HTTPException(400, "bad slug")
+    store = get_comments()
+    parent = ""
+    if body.parent:
+        p = store.get(slug, body.parent) if CID.match(body.parent) else None
+        if not p:
+            raise HTTPException(400, "bad parent")
+        parent = p.parent or p.id
+    c = store.add(Comment(slug=slug, text=body.text.strip(), created=reply_now(), seed="", state="live", parent=parent,
+                          owner=True, title=body.title))
+    notify_parent(c)
+    return {"ok": True, "id": c.id}
 
 
 @app.get("/admin/replies", dependencies=[Depends(require_admin)])
