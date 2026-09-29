@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from . import mail
 from .reactions import CLIENT, KINDS, SLUG, get_reactions
-from .replies import MAX_TEXT, Reply, get_replies, over_limit
+from .replies import MAX_TEXT, Reply, get_replies
 from .replies import now_iso as reply_now
 from .settings import settings
 from .store import Subscriber, by_unsub_token, get_store, new_confirm_token, now, parse, purge_pending, unsubscribe_token
@@ -167,7 +167,7 @@ def reply(slug: str, body: ReplyIn) -> dict[str, Any]:
     if email and not EMAIL.match(email):
         raise HTTPException(400, "invalid email")
     store = get_replies()
-    if over_limit(store, body.client):
+    if not store.take_quota(body.client):
         raise HTTPException(429, "slow down")
     r = store.add(Reply(slug=slug, text=body.text, created=reply_now(), client=body.client, name=body.name, email=email))
     if settings.notify_email:

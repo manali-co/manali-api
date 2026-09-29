@@ -112,3 +112,13 @@ def test_replies_store_notify_limit_and_admin() -> None:
     assert c.post("/replies/hello", json={"client": me, "text": ""}, headers=H).status_code == 422
     rid = got[0]["id"]
     assert c.delete(f"/admin/replies/hello/{rid}", headers=A).json() == {"ok": True}
+
+
+def test_reply_quota_holds_under_concurrency() -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    store = replies.MemoryReplies()
+    with ThreadPoolExecutor(16) as ex:
+        granted = list(ex.map(lambda _: store.take_quota("client-dddddddddddddddd"), range(40)))
+    assert granted.count(True) == replies.PER_CLIENT_PER_HOUR
+    assert store.take_quota("client-eeeeeeeeeeeeeeee")  # another browser has its own budget
