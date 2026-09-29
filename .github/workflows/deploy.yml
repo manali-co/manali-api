@@ -67,6 +67,7 @@ jobs:
           APPI_ID: ${{ vars.APPINSIGHTS_ID }}
           SITE_URL: ${{ vars.SITE_URL }}
           MAIL_FROM: ${{ vars.MAIL_FROM }}
+          NOTIFY_EMAIL: ${{ vars.NOTIFY_EMAIL }}
         run: |
           # Fail here, not in a subscriber's inbox: an empty variable would otherwise reach the app.
           # APPINSIGHTS_ID may be empty: Bicep then creates an Application Insights in the resource group.
@@ -81,7 +82,7 @@ jobs:
             --template-file infra/main.bicep \
             --parameters env="$ENV" appInsightsId="$APPI_ID" siteUrl="$SITE_URL" \
               apiKey="$API_KEY" tokenSecret="$TOKEN_SECRET" adminKey="$ADMIN_KEY" resendApiKey="$RESEND_API_KEY" \
-              ${MAIL_FROM:+mailFrom="$MAIL_FROM"}
+              ${MAIL_FROM:+mailFrom="$MAIL_FROM"} ${NOTIFY_EMAIL:+notifyEmail="$NOTIFY_EMAIL"}
       - name: Install Azure Functions Core Tools
         run: npm install -g azure-functions-core-tools@4 --unsafe-perm true
       - name: Deploy functions (Flex Consumption, remote build)

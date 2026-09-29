@@ -22,6 +22,8 @@ param resendApiKey string = ''
 @description('Where the site lives; every link in email is built from it. Must be https and must serve /confirm/ and /unsubscribe/.')
 param siteUrl string
 param mailFrom string = 'manali apps <hello@manali.page>'
+@description('Owner address that receives an email for each reply to a post')
+param notifyEmail string = ''
 
 var name = 'manali-${env}'
 var storageName = replace('st${name}${uniqueString(resourceGroup().id)}', '-', '')
@@ -93,6 +95,7 @@ resource func 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'RESEND_API_KEY', value: resendApiKey }
         { name: 'MANALI_SITE_URL', value: siteUrl }
         { name: 'MANALI_MAIL_FROM', value: mailFrom }
+        { name: 'MANALI_NOTIFY_EMAIL', value: notifyEmail }
       ]
     }
   }

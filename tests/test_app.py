@@ -5,10 +5,11 @@ os.environ["MANALI_API_KEY"] = "test-key-test-key-test-key-test-key"
 os.environ["MANALI_ADMIN_KEY"] = "admin-key-admin-key-admin-key-admin"
 os.environ["MANALI_TOKEN_SECRET"] = "test-secret-test-secret-test-secret-test"
 os.environ["MANALI_SITE_URL"] = "https://example.test"
+os.environ["MANALI_NOTIFY_EMAIL"] = "owner@example.test"
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from manali_api import mail, reactions, store  # noqa: E402
+from manali_api import mail, reactions, replies, store  # noqa: E402
 from manali_api.app import app  # noqa: E402
 
 H = {"x-api-key": os.environ["MANALI_API_KEY"]}
@@ -19,6 +20,7 @@ def setup_function() -> None:
     store._store = store.MemoryStore()
     mail._mailer = mail.MemoryMailer()
     reactions._store = reactions.MemoryReactions()
+    replies._store = replies.MemoryReplies()
 
 
 def test_subscribe_confirm_announce_unsubscribe() -> None:
@@ -90,3 +92,23 @@ def test_reactions_toggle_per_browser() -> None:
     assert c.get("/reactions/hello", headers=H).json()["mine"] == []  # no id in the URL, ever
     assert c.post("/reactions/hello", json={"client": me, "kind": "nope"}, headers=H).status_code == 400
     assert c.post("/reactions/Bad Slug", json={"client": me, "kind": "sun"}, headers=H).status_code == 400
+
+
+def test_replies_store_notify_limit_and_admin() -> None:
+    c = TestClient(app)
+    me = "client-cccccccccccccccc"
+    body = {"client": me, "text": "  I would want it to ask about failures.  ", "name": "Mira", "email": "Mira@Example.com", "title": "Screening"}
+    assert c.post("/replies/hello", json=body, headers=H).json() == {"ok": True}
+    sent = mail.get_mailer().sent[-1]
+    assert sent[0] == ["owner@example.test"] and "Mira" in sent[2] and "ask about failures" in sent[2]
+    got = c.get("/admin/replies", headers=A).json()["replies"]
+    assert got[0]["text"] == "I would want it to ask about failures." and got[0]["email"] == "mira@example.com"
+    assert c.get("/admin/replies", headers=H).status_code == 401  # admin key required
+    for _ in range(4):
+        c.post("/replies/hello", json={"client": me, "text": "more"}, headers=H)
+    assert c.post("/replies/hello", json={"client": me, "text": "too many"}, headers=H).status_code == 429
+    assert c.post("/replies/hello", json={"client": me, "text": "x", "email": "nope"}, headers=H).status_code == 400
+    assert c.post("/replies/Bad Slug", json={"client": me, "text": "x"}, headers=H).status_code == 400
+    assert c.post("/replies/hello", json={"client": me, "text": ""}, headers=H).status_code == 422
+    rid = got[0]["id"]
+    assert c.delete(f"/admin/replies/hello/{rid}", headers=A).json() == {"ok": True}

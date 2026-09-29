@@ -17,6 +17,8 @@ from pydantic import BaseModel, Field, field_validator
 
 from . import mail
 from .reactions import CLIENT, KINDS, SLUG, get_reactions
+from .replies import MAX_TEXT, Reply, get_replies, over_limit
+from .replies import now_iso as reply_now
 from .settings import settings
 from .store import Subscriber, by_unsub_token, get_store, new_confirm_token, now, parse, purge_pending, unsubscribe_token
 
@@ -97,6 +99,19 @@ class PostIn(BaseModel):
         return re.sub(r"[\r\n\t]+", " ", v).strip()
 
 
+class ReplyIn(BaseModel):
+    client: str = Field(max_length=64)
+    text: str = Field(min_length=1, max_length=MAX_TEXT)
+    name: str = Field(default="", max_length=80)
+    email: str = Field(default="", max_length=254)
+    title: str = Field(default="", max_length=200)
+
+    @field_validator("text", "name", "title")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        return v.strip()
+
+
 class ReactIn(BaseModel):
     client: str = Field(max_length=64)
     kind: str = Field(max_length=16)
@@ -132,6 +147,42 @@ def react(slug: str, body: ReactIn) -> dict[str, Any]:
         raise HTTPException(400, "bad request")
     c = get_reactions().toggle(slug, body.client, body.kind)
     return {"counts": c.counts, "mine": c.mine}
+
+
+# --- replies ---------------------------------------------------------------------------------
+
+@app.post("/replies/{slug}", status_code=202, dependencies=[Depends(require_key)])
+def reply(slug: str, body: ReplyIn) -> dict[str, Any]:
+    """A reply to a post, no account needed. Rate-limited per browser; the owner gets an email.
+    The answer never echoes anything back."""
+    if not SLUG.match(slug) or not CLIENT.match(body.client) or not body.text:
+        raise HTTPException(400, "bad request")
+    email = body.email.strip().lower()
+    if email and not EMAIL.match(email):
+        raise HTTPException(400, "invalid email")
+    store = get_replies()
+    if over_limit(store, body.client):
+        raise HTTPException(429, "slow down")
+    r = store.add(Reply(slug=slug, text=body.text, created=reply_now(), client=body.client, name=body.name, email=email))
+    if settings.notify_email:
+        post_url, admin_url = f"{settings.site_url}/blog/{slug}/", f"{settings.site_url}/admin/"
+        subject, html_body = mail.reply_notice(body.title or slug, post_url, r.text, r.name, r.email, admin_url)
+        m = mail.message(settings.notify_email, subject, html_body)
+        if r.email:
+            m["reply_to"] = r.email
+        mail.get_mailer().send_many([m])
+    return {"ok": True}
+
+
+@app.get("/admin/replies", dependencies=[Depends(require_admin)])
+def replies_list() -> dict[str, Any]:
+    rows = get_replies().latest(50)
+    return {"replies": [{"slug": r.slug, "id": r.id, "text": r.text, "name": r.name, "email": r.email, "created": r.created} for r in rows]}
+
+
+@app.delete("/admin/replies/{slug}/{reply_id}", dependencies=[Depends(require_admin)])
+def replies_delete(slug: str, reply_id: str) -> dict[str, Any]:
+    return {"ok": get_replies().delete(slug, reply_id)}
 
 
 # --- subscribers -----------------------------------------------------------------------------

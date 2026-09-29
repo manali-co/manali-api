@@ -116,6 +116,18 @@ def post_email(post: dict[str, Any], unsub_url: str) -> tuple[str, str]:
     return f"New post: {post['title']}", shell(post["title"], post.get("summary", ""), body, default_footer(unsub_url))
 
 
+def reply_notice(post_title: str, post_url: str, text: str, name: str, email: str, admin_url: str) -> tuple[str, str]:
+    """To the owner: someone replied to a post. Plain, with the reply quoted."""
+    who = name or "Someone"
+    contact = f" · {esc(email)}" if email else " · no email left"
+    quote = (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px"><tr>'
+             f'<td class="ma-quote ma-text" style="background:{E["paper"]};border-left:3px solid {E["gold"]};border-radius:0 12px 12px 0;padding:16px 20px;font-size:16px;line-height:1.6;color:{E["ink"]};white-space:pre-wrap">{esc(text)}</td></tr></table>')
+    body = (h1(f"{who} replied to “{post_title}”") + p(f"{esc(who)}{contact}", muted=True, small=True, raw=True) + quote
+            + button("Open the post", post_url))
+    footer = f'All replies are on <a href="{esc(admin_url)}" style="color:{E["ink3"]}">your admin page</a>. Reply to this email to answer them directly, if they left an address.'
+    return f"Reply on “{post_title}”", shell("New reply", f"{who}: {text[:80]}", body, footer)
+
+
 def unsubscribed_email() -> tuple[str, str]:
     body = (h1("You're unsubscribed.")
             + p(f'Done. No more email from us. The posts stay on the site if you ever want them, and you can <a href="{esc(settings.site_url)}/subscribe/">subscribe again</a> any time. We won\'t mention this.', raw=True))
