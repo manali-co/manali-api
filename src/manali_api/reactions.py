@@ -12,7 +12,9 @@ from typing import Protocol
 
 from .settings import settings
 
-KINDS = ("thumbs-up", "heart", "rocket", "eyes", "laugh", "sun")
+# "idea" (learned something) arrived with the 29 Sep redesign. thumbs-up and eyes stay so their
+# stored counts still load; the site no longer offers them.
+KINDS = ("thumbs-up", "heart", "rocket", "eyes", "laugh", "sun", "idea")
 SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,120}$")
 CLIENT = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
 
