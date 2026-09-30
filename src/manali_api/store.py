@@ -60,6 +60,12 @@ class Subscriber:
         """Should a new post in `series` (None for a standalone post) reach this address?"""
         return self.everything or (series is not None and series in self.follows())
 
+    def unfollow(self, slug: str) -> bool:
+        """Drop one followed series. Returns whether it was followed."""
+        current = self.follows()
+        self.series = ",".join(x for x in current if x != slug)
+        return slug in current
+
     def to_row(self) -> dict[str, Any]:
         return {"PartitionKey": "sub", "RowKey": key(self.email), **asdict(self)}
 
@@ -101,19 +107,23 @@ class Store(Protocol):
     def all(self) -> list[Subscriber]: ...
     def by_confirm_token(self, token: str) -> Subscriber | None: ...
     def log_email(
-        self, subject: str, recipients: int, slug: str = "", audience: list[str] | None = None, accepted: list[str] | None = None
+        self, subject: str, recipients: int, slug: str = "", audience: list[str] | None = None, accepted: list[str] | None = None,
+        failures: dict[str, str] | None = None, followers: list[str] | None = None,
     ) -> None: ...
     def last_email(self) -> dict[str, Any] | None: ...
     def announced(self, slug: str) -> bool: ...
     def announcements(self) -> list[dict[str, Any]]: ...
 
 
-def send_log(audience: list[str], accepted: list[str]) -> list[dict[str, Any]]:
+def send_log(
+    audience: list[str], accepted: list[str], failures: dict[str, str] | None = None, followers: list[str] | None = None
+) -> list[dict[str, Any]]:
     """Who a send was meant for and whether Resend took it. Only the hashed row key is kept, never
     the address: the admin view matches keys back to current subscribers, so an address that
     unsubscribes later is gone from here too (the privacy page promises unsubscribing deletes it)."""
-    ok = {key(e) for e in accepted}
-    return [{"key": key(e), "ok": key(e) in ok} for e in audience]
+    ok, fol, why = {key(e) for e in accepted}, {key(e) for e in followers or []}, {key(e): r for e, r in (failures or {}).items()}
+    keys = [key(e) for e in audience]
+    return [{"key": k, "ok": k in ok, "follower": k in fol, "reason": "" if k in ok else why.get(k, "not sent")} for k in keys]
 
 
 def by_unsub_token(store: Store, token: str) -> Subscriber | None:
@@ -154,12 +164,13 @@ class MemoryStore:
         return next((s for s in self.rows.values() if s.confirm_token and hmac.compare_digest(s.confirm_token, token)), None)
 
     def log_email(
-        self, subject: str, recipients: int, slug: str = "", audience: list[str] | None = None, accepted: list[str] | None = None
+        self, subject: str, recipients: int, slug: str = "", audience: list[str] | None = None, accepted: list[str] | None = None,
+        failures: dict[str, str] | None = None, followers: list[str] | None = None,
     ) -> None:
         row: dict[str, Any] = {"id": f"{len(self.events):013d}", "subject": subject, "sent": now(), "recipients": recipients}
         row["slug"] = slug
         if audience is not None:
-            row.update(subscribers=len(audience), to=send_log(audience, accepted or []))
+            row.update(subscribers=len(audience), to=send_log(audience, accepted or [], failures, followers))
         self.events.insert(0, row)
 
     def last_email(self) -> dict[str, Any] | None:
@@ -216,7 +227,8 @@ class TableStore:
         return Subscriber.from_row(rows[0]) if rows else None
 
     def log_email(
-        self, subject: str, recipients: int, slug: str = "", audience: list[str] | None = None, accepted: list[str] | None = None
+        self, subject: str, recipients: int, slug: str = "", audience: list[str] | None = None, accepted: list[str] | None = None,
+        failures: dict[str, str] | None = None, followers: list[str] | None = None,
     ) -> None:
         # newest sorts first; the suffix keeps two sends in the same millisecond apart
         stamp = f"{10**13 - int(datetime.now(UTC).timestamp() * 1000):013d}-{secrets.token_hex(4)}"
@@ -225,7 +237,9 @@ class TableStore:
         if audience is not None:
             row["subscribers"] = len(audience)
             # one row per recipient in the send's own partition, written 100 at a time (a table transaction's limit)
-            rows = [{"PartitionKey": f"to-{stamp}", "RowKey": r["key"], "ok": r["ok"]} for r in send_log(audience, accepted or [])]
+            log = send_log(audience, accepted or [], failures, followers)
+            rows = [{"PartitionKey": f"to-{stamp}", "RowKey": r["key"], "ok": r["ok"], "follower": r["follower"], "reason": r["reason"]}
+                    for r in log]
             for i in range(0, len(rows), 100):
                 self.events.submit_transaction([("upsert", r) for r in rows[i : i + 100]])
         self.events.upsert_entity(row)  # last, so a listed send always has its recipients
@@ -247,7 +261,8 @@ class TableStore:
             if "subscribers" in r:  # sends from before recipient lists were kept have only the count
                 e["subscribers"] = int(r["subscribers"])
                 sent_to = self.events.query_entities("PartitionKey eq @p", parameters={"p": f"to-{r['RowKey']}"})
-                e["to"] = [{"key": t["RowKey"], "ok": bool(t["ok"])} for t in sent_to]
+                e["to"] = [{"key": t["RowKey"], "ok": bool(t["ok"]), "follower": bool(t.get("follower")), "reason": t.get("reason", "")}
+                           for t in sent_to]
             out.append(e)
         return out
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 import hmac
 import re
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field, field_validator
@@ -89,6 +89,10 @@ class TokenIn(BaseModel):
     token: str = Field(max_length=80)
 
 
+class UnsubscribeIn(TokenIn):
+    series: str | None = Field(default=None, max_length=120)  # stop just this series, keep the rest
+
+
 class PostIn(BaseModel):
     slug: str = Field(max_length=120)
     title: str = Field(max_length=200)
@@ -101,6 +105,14 @@ class PostIn(BaseModel):
     author: str = Field(default="Manali", max_length=120)
     series: str | None = Field(default=None, max_length=120)  # followers of this series get it too
     seriesTitle: str = Field(default="", max_length=120)
+    seriesPart: int | None = Field(default=None, ge=1, le=99)
+    seriesTotal: int | None = Field(default=None, ge=1, le=99)
+    seriesUrl: str | None = None
+    authorKind: Literal["person", "agent"] = "person"
+    authorName: str = Field(default="", max_length=120)
+    authorOwner: str = Field(default="", max_length=120)  # the person an agent wrote for
+    readTime: str = Field(default="", max_length=20)
+    note: str = Field(default="", max_length=2000)  # opens the letter, signed by Ayush
     force: bool = False
 
     @field_validator("slug")
@@ -110,7 +122,7 @@ class PostIn(BaseModel):
             raise ValueError("bad slug")
         return v
 
-    @field_validator("url", "cover")
+    @field_validator("url", "cover", "seriesUrl")
     @classmethod
     def _https(cls, v: str | None) -> str | None:
         if v is not None and not v.startswith("https://"):
@@ -521,16 +533,22 @@ def confirm(body: TokenIn) -> dict[str, Any]:
 
 
 @app.post("/unsubscribe", dependencies=[Depends(require_key)])
-def unsubscribe(body: TokenIn) -> dict[str, Any]:
+def unsubscribe(body: UnsubscribeIn) -> dict[str, Any]:
     """Deletes the row. Idempotent: a replayed token is a no-op and sends nothing. The answer
-    does not reveal whether the token matched anyone."""
+    does not reveal whether the token matched anyone. With `series`, only that follow is dropped;
+    an address left following nothing at all is deleted like any other unsubscribe."""
     store = get_store()
     sub = by_unsub_token(store, body.token)
+    if sub and body.series and (sub.everything or sub.follows() != [body.series]):
+        if sub.unfollow(body.series):
+            store.put(sub)
+        return {"ok": True, "scope": "series"}
     if sub:
         store.delete(sub)
         subject, html_body = mail.unsubscribed_email()
         mail.get_mailer().send(sub.email, subject, html_body)
-    return {"ok": True}
+    # "all" when the whole address went (it followed only this series); an unknown token answers like a match
+    return {"ok": True, "scope": "all" if sub or not body.series else "series"}
 
 
 # --- admin -----------------------------------------------------------------------------------
@@ -549,6 +567,20 @@ def stats() -> dict[str, Any]:
     }
 
 
+EMAIL_ONLY = {"force", "series", "note"}
+
+
+def announcement(post: PostIn, sub: Subscriber, theme: str | None = None) -> dict[str, Any]:
+    """One subscriber's copy. Someone who follows only this series gets a footer that can stop just
+    that series; everyone else gets the usual one-click unsubscribe."""
+    page, one_click = unsubscribe_links(sub.email)
+    follower = not sub.everything
+    stop = f"{page}&series={post.series}" if follower and post.series else ""
+    subject, html_body = mail.post_email(post.model_dump(exclude=EMAIL_ONLY), page, note=post.note, stop_series_url=stop, theme=theme)
+    from_ = mail.sender(mail.post_meta(post.model_dump(), post.note)["fromName"])
+    return mail.message(sub.email, subject, html_body, mail.unsubscribe_headers(one_click), from_=from_)
+
+
 @app.post("/admin/announce", dependencies=[Depends(require_admin)])
 def announce(post: PostIn) -> dict[str, Any]:
     """One message per confirmed address (each has its own unsubscribe link), sent in batches
@@ -558,24 +590,28 @@ def announce(post: PostIn) -> dict[str, Any]:
     if not post.force and store.announced(post.slug):
         raise HTTPException(409, "already announced; pass force to send again")
     live = [s for s in store.all() if s.confirmed and s.wants(post.series)]
-    messages = []
-    for s in live:
-        page, one_click = unsubscribe_links(s.email)
-        reason = f"You got this because you follow {post.seriesTitle or 'this series'} at manali apps." if not s.everything else ""
-        subject, html_body = mail.post_email(post.model_dump(exclude={"force", "series", "seriesTitle"}), page, reason)
-        messages.append(mail.message(s.email, subject, html_body, mail.unsubscribe_headers(one_click)))
+    messages = [announcement(post, s) for s in live]
     accepted: list[str] = []
-    sent = mail.get_mailer().send_many(messages, idempotency=f"announce/{post.slug}", accepted=accepted) if messages else 0
-    store.log_email(post.title, sent, slug=post.slug, audience=[s.email for s in live], accepted=accepted)
+    failures: dict[str, str] = {}
+    sent = 0
+    if messages:
+        sent = mail.get_mailer().send_many(messages, idempotency=f"announce/{post.slug}", accepted=accepted, failures=failures)
+    followers = [s.email for s in live if not s.everything]
+    audience = [s.email for s in live]
+    store.log_email(post.title, sent, slug=post.slug, audience=audience, accepted=accepted, failures=failures, followers=followers)
     return {"recipients": sent, "subscribers": len(live)}
 
 
 @app.post("/admin/announce/preview", dependencies=[Depends(require_admin)])
-def announce_preview(post: PostIn) -> dict[str, Any]:
-    """The exact email a subscriber would get, with a sample unsubscribe link. Sends nothing."""
-    sample_unsub = f"{settings.site_url}/unsubscribe/?token=preview"
-    subject, html_body = mail.post_email(post.model_dump(exclude={"force", "series", "seriesTitle"}), sample_unsub)
-    return {"subject": subject, "html": html_body}
+def announce_preview(post: PostIn, theme: Literal["dark", "light"] | None = None) -> dict[str, Any]:
+    """The exact email a subscriber would get, with a sample unsubscribe link, and how many people
+    a send would reach right now. Sends nothing."""
+    live = [s for s in get_store().all() if s.confirmed and s.wants(post.series)]
+    sample = Subscriber(email="you@example.com", created="", confirmed=True)
+    m = announcement(post, sample, theme)
+    preheader = mail.post_meta(post.model_dump(), post.note)["preheader"]
+    return {"from": m["from"], "subject": m["subject"], "preheader": preheader, "html": m["html"],
+            "audience": len(live), "followers": sum(1 for s in live if not s.everything)}
 
 
 @app.get("/admin/announcements", dependencies=[Depends(require_admin)])
@@ -589,7 +625,8 @@ def announcements() -> dict[str, Any]:
     for a in store.announcements():
         to = a.pop("to")
         # failed first, then delivered, with the since-unsubscribed at the end of each
-        rows = ({"email": emails.get(t["key"]), "ok": t["ok"]} for t in to or [])
+        rows = ({"email": emails.get(t["key"]), "ok": t["ok"], "follower": t.get("follower", False), "reason": t.get("reason", "")}
+                for t in to or [])
         a["to"] = None if to is None else sorted(rows, key=lambda t: (t["ok"], t["email"] is None, t["email"] or ""))
         out.append(a)
     return {"announcements": out}
