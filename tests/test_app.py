@@ -73,7 +73,7 @@ def test_keys_and_validation() -> None:
     assert c.post("/subscribe", json={"email": "a/b@example.com"}, headers=H).status_code == 400
     assert c.get("/admin/stats", headers=H).status_code == 401  # site key alone is not enough
     assert c.post("/confirm", json={"token": "nope"}, headers=H).json() == {"ok": False}
-    assert c.post("/unsubscribe", json={"token": "nope.nope"}, headers=H).json() == {"ok": True}
+    assert c.post("/unsubscribe", json={"token": "nope.nope"}, headers=H).json()["ok"] is True
     bad = {"slug": "x", "title": "T", "url": "javascript:alert(1)"}
     assert c.post("/admin/announce", json=bad, headers=A).status_code == 422
     assert c.get("/healthz").json()["configured"] is True
@@ -145,7 +145,7 @@ def test_series_followers_get_only_their_series() -> None:
     assert c.post("/admin/announce", json=post, headers=A).json()["recipients"] == 1  # not the follower
     part = {"slug": "part-2", "title": "Part two", "url": "https://example.test/blog/part-2/", "series": "evening-builds", "seriesTitle": "Evening builds"}
     assert c.post("/admin/announce", json=part, headers=A).json()["recipients"] == 2
-    to_follower = [m for m in mailer.sent if m[0] == ["f@example.com"] and m[1] == "New post: Part two"]
+    to_follower = [m for m in mailer.sent if m[0] == ["f@example.com"] and m[1] == "Part two"]
     assert to_follower and "because you follow Evening builds" in to_follower[0][2]
     other = {**part, "slug": "else", "series": "another-one", "seriesTitle": "Another"}
     assert c.post("/admin/announce", json=other, headers=A).json()["recipients"] == 1
@@ -246,3 +246,69 @@ def test_comments_share_the_reply_rate_limit() -> None:
     codes = [c.post("/comments/hello", json={"client": me, "text": f"n{i}"}, headers=H).status_code for i in range(6)]
     assert codes[:5] == [202] * 5 and codes[5] == 429
     assert c.post("/comments/hello", json={"client": me, "text": "x", "parent": "nope"}, headers=H).status_code == 400
+
+
+def test_announcements_list_who_got_it() -> None:
+    c = TestClient(app)
+    s = store.get_store()
+    for e in ("a@example.com", "b@example.com"):
+        s.put(store.Subscriber(email=e, confirmed=True, created=store.now()))
+    s.log_email("Old one", 9, slug="old")  # from before recipient lists were kept
+    post = {"slug": "hello", "title": "Hello", "summary": "First.", "url": "https://example.test/blog/hello/", "author": "Ayush"}
+    n = len(mail.get_mailer().sent)
+    preview = c.post("/admin/announce/preview", json=post, headers=A).json()
+    assert preview["subject"] == "Hello" and "Read it" in preview["html"]
+    assert len(mail.get_mailer().sent) == n  # a preview sends nothing
+    assert c.post("/admin/announce", json=post, headers=A).json() == {"recipients": 2, "subscribers": 2}
+    got = c.get("/admin/announcements", headers=A).json()["announcements"]
+    assert [a["slug"] for a in got] == ["hello", "old"]
+    assert [(t["email"], t["ok"]) for t in got[0]["to"]] == [("a@example.com", True), ("b@example.com", True)]
+    assert got[1]["to"] is None and got[1]["recipients"] == 9
+    c.post("/unsubscribe", json={"token": store.unsubscribe_token("b@example.com")}, headers=H)
+    to = c.get("/admin/announcements", headers=A).json()["announcements"][0]["to"]
+    assert [(t["email"], t["ok"]) for t in to] == [("a@example.com", True), (None, True)]  # the address is gone
+    assert c.get("/admin/announcements", headers=H).status_code == 401
+
+
+def test_letter_email_and_series_stop() -> None:
+    c = TestClient(app)
+    s = store.get_store()
+    s.put(store.Subscriber(email="all@example.com", confirmed=True, created=store.now()))
+    fan = store.Subscriber(email="fan@example.com", confirmed=True, created=store.now(), everything=False)
+    fan.follow("building-yapp", "Building Yapp")
+    fan.follow("other")
+    s.put(fan)
+    post = {"slug": "p2", "title": "Undo", "summary": "Why undo.", "url": "https://example.test/blog/p2/", "series": "building-yapp",
+            "seriesTitle": "Building Yapp", "seriesPart": 2, "seriesTotal": 3, "seriesUrl": "https://example.test/series/building-yapp/",
+            "authorKind": "agent", "authorName": "Claude", "authorOwner": "Ayush Manish Agrawal", "project": "yapp", "note": "Claude wrote this one.\n\nI kept it."}
+    assert c.post("/admin/announce/preview", json={**post, "seriesPart": 5}, headers=A).status_code == 422  # part 5 of 3
+    pv = c.post("/admin/announce/preview?theme=dark", json=post, headers=A).json()
+    assert pv["subject"] == "Building Yapp, part 2: Undo" and pv["preheader"] == "Claude wrote this one."
+    assert pv["from"].startswith("Ayush at manali apps") and pv["audience"] == 2 and pv["followers"] == 1
+    assert 'class="ma-email ma-dark"' in pv["html"] and "Part 2 of 3" in pv["html"] and "/email/agent-yapp@2x.png" in pv["html"]
+    assert c.post("/admin/announce", json=post, headers=A).json() == {"recipients": 2, "subscribers": 2}
+    sent = {to[0]: html for to, _, html in mail.get_mailer().sent[-2:]}
+    assert "Stop following this series" in sent["fan@example.com"] and "Stop following" not in sent["all@example.com"]
+    to = c.get("/admin/announcements", headers=A).json()["announcements"][0]["to"]
+    assert {t["email"]: t["follower"] for t in to} == {"all@example.com": False, "fan@example.com": True}
+    # stopping one series keeps the other follow; stopping the last one removes the address
+    tok = store.unsubscribe_token("fan@example.com")
+    assert c.post("/unsubscribe", json={"token": tok, "series": "building-yapp"}, headers=H).json()["scope"] == "series"
+    assert s.get("fan@example.com").follows() == ["other"]
+    assert c.post("/unsubscribe", json={"token": tok, "series": "other"}, headers=H).json()["scope"] == "all"
+    assert s.get("fan@example.com") is None
+
+
+def test_failed_batches_are_recorded() -> None:
+    class Flaky(mail.MemoryMailer):
+        def send_many(self, messages, idempotency="", accepted=None, failures=None):  # noqa: ANN001, ANN201
+            failures.update((m["to"][0], "rejected by Resend (422)") for m in messages)
+            return 0
+
+    mail._mailer = Flaky()
+    c = TestClient(app)
+    store.get_store().put(store.Subscriber(email="a@example.com", confirmed=True, created=store.now()))
+    post = {"slug": "hello", "title": "Hello", "url": "https://example.test/blog/hello/"}
+    assert c.post("/admin/announce", json=post, headers=A).json() == {"recipients": 0, "subscribers": 1}
+    got = c.get("/admin/announcements", headers=A).json()["announcements"][0]
+    assert got["to"] == [{"email": "a@example.com", "ok": False, "follower": False, "reason": "rejected by Resend (422)"}]
