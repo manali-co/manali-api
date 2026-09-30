@@ -263,8 +263,8 @@ def post_email(post: dict[str, Any], unsub_url: str, reason: str = "", note: str
                    f'<td style="vertical-align:middle;padding-left:12px"><span class="ma-text" style="display:block;font-family:{E["display"]};font-size:17px;font-weight:600;line-height:22px;color:{E["ink"]}">Ayush</span>'
                    f'<span class="ma-faint" style="display:block;font-size:13px;line-height:18px;color:{E["ink3"]}">manali apps</span></td></tr></table>'
                    '<div style="height:28px;line-height:28px;font-size:0">&nbsp;</div>')
-    part, total = post.get("seriesPart"), post.get("seriesTotal")
-    track = _track(int(part), int(total or part)) if post.get("seriesTitle") and part else ""
+    part = int(post.get("seriesPart") or 0)
+    track = _track(part, int(post.get("seriesTotal") or part)) if post.get("seriesTitle") and part else ""
     summary = f'<p class="ma-muted" style="margin:0 0 18px;font-size:15px;line-height:1.6;color:{E["ink2"]}">{esc(post["summary"])}</p>' if post.get("summary") else ""
     card = (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="ma-sunk" style="background:{E["paper"]};border:1px solid {E["line"]};border-radius:14px;border-collapse:separate">'
             f'<tr><td style="padding:0"><a href="{esc(post["url"])}" style="display:block;text-decoration:none">{_cover(post)}</a></td></tr>'
@@ -272,10 +272,10 @@ def post_email(post: dict[str, Any], unsub_url: str, reason: str = "", note: str
             f'<h2 class="ma-text ma-h2" style="margin:0 0 10px;font-family:{E["display"]};font-weight:500;font-size:23px;line-height:1.25;color:{E["ink"]}">{esc(post["title"])}</h2>'
             f'{summary}{_byline(post)}{button("Read it", post["url"])}</td></tr></table>')
     missed = ""
-    if track and int(part) > 1 and post.get("seriesUrl"):
-        earlier = "Part 1 is" if int(part) == 2 else f"Parts 1 to {int(part) - 1} are"
+    if track and part > 1 and post.get("seriesUrl"):
+        earlier = "Part 1 is" if part == 2 else f"Parts 1 to {part - 1} are"
         missed = (f'<div style="height:16px;font-size:0;line-height:16px">&nbsp;</div><p class="ma-faint" style="margin:0;font-size:13px;line-height:18px;color:{E["ink3"]}">'
-                  f'{earlier} up if you missed {"it" if int(part) == 2 else "them"}. <a href="{esc(post["seriesUrl"])}" class="ma-link" style="color:{E["indigo"]}">See the series</a></p>')
+                  f'{earlier} up if you missed {"it" if part == 2 else "them"}. <a href="{esc(post["seriesUrl"])}" class="ma-link" style="color:{E["indigo"]}">See the series</a></p>')
     if stop_series_url:
         footer = (f'You got this because you follow {esc(post.get("seriesTitle") or "this series")} on manali apps. '
                   f'<a href="{esc(stop_series_url)}" style="color:{E["ink3"]}">Stop following this series</a> or '

@@ -281,6 +281,7 @@ def test_letter_email_and_series_stop() -> None:
     post = {"slug": "p2", "title": "Undo", "summary": "Why undo.", "url": "https://example.test/blog/p2/", "series": "building-yapp",
             "seriesTitle": "Building Yapp", "seriesPart": 2, "seriesTotal": 3, "seriesUrl": "https://example.test/series/building-yapp/",
             "authorKind": "agent", "authorName": "Claude", "authorOwner": "Ayush Manish Agrawal", "project": "yapp", "note": "Claude wrote this one.\n\nI kept it."}
+    assert c.post("/admin/announce/preview", json={**post, "seriesPart": 5}, headers=A).status_code == 422  # part 5 of 3
     pv = c.post("/admin/announce/preview?theme=dark", json=post, headers=A).json()
     assert pv["subject"] == "Building Yapp, part 2: Undo" and pv["preheader"] == "Claude wrote this one."
     assert pv["from"].startswith("Ayush at manali apps") and pv["audience"] == 2 and pv["followers"] == 1

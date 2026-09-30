@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from . import mail
 from .comments import MAX_TEXT as COMMENT_MAX
@@ -135,6 +135,12 @@ class PostIn(BaseModel):
         if v is not None and not SLUG.match(v):
             raise ValueError("bad series")
         return v
+
+    @model_validator(mode="after")
+    def _part_fits(self) -> PostIn:
+        if self.seriesPart and self.seriesTotal and self.seriesPart > self.seriesTotal:
+            raise ValueError("seriesPart can't be past seriesTotal")
+        return self
 
     @field_validator("title", "summary", "author", "seriesTitle")
     @classmethod
