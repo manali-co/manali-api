@@ -100,9 +100,20 @@ class Store(Protocol):
     def delete(self, sub: Subscriber) -> None: ...
     def all(self) -> list[Subscriber]: ...
     def by_confirm_token(self, token: str) -> Subscriber | None: ...
-    def log_email(self, subject: str, recipients: int, slug: str = "") -> None: ...
+    def log_email(
+        self, subject: str, recipients: int, slug: str = "", audience: list[str] | None = None, accepted: list[str] | None = None
+    ) -> None: ...
     def last_email(self) -> dict[str, Any] | None: ...
     def announced(self, slug: str) -> bool: ...
+    def announcements(self) -> list[dict[str, Any]]: ...
+
+
+def send_log(audience: list[str], accepted: list[str]) -> list[dict[str, Any]]:
+    """Who a send was meant for and whether Resend took it. Only the hashed row key is kept, never
+    the address: the admin view matches keys back to current subscribers, so an address that
+    unsubscribes later is gone from here too (the privacy page promises unsubscribing deletes it)."""
+    ok = {key(e) for e in accepted}
+    return [{"key": key(e), "ok": key(e) in ok} for e in audience]
 
 
 def by_unsub_token(store: Store, token: str) -> Subscriber | None:
@@ -142,14 +153,24 @@ class MemoryStore:
     def by_confirm_token(self, token: str) -> Subscriber | None:
         return next((s for s in self.rows.values() if s.confirm_token and hmac.compare_digest(s.confirm_token, token)), None)
 
-    def log_email(self, subject: str, recipients: int, slug: str = "") -> None:
-        self.events.insert(0, {"subject": subject, "sent": now(), "recipients": recipients, "slug": slug})
+    def log_email(
+        self, subject: str, recipients: int, slug: str = "", audience: list[str] | None = None, accepted: list[str] | None = None
+    ) -> None:
+        row: dict[str, Any] = {"id": f"{len(self.events):013d}", "subject": subject, "sent": now(), "recipients": recipients}
+        row["slug"] = slug
+        if audience is not None:
+            row.update(subscribers=len(audience), to=send_log(audience, accepted or []))
+        self.events.insert(0, row)
 
     def last_email(self) -> dict[str, Any] | None:
         return self.events[0] if self.events else None
 
     def announced(self, slug: str) -> bool:
         return any(e.get("slug") == slug for e in self.events)
+
+    def announcements(self) -> list[dict[str, Any]]:
+        fields = ("id", "slug", "subject", "sent", "recipients", "subscribers", "to")
+        return [{k: e.get(k) for k in fields} for e in self.events if e.get("slug")]
 
 
 class TableStore:
@@ -194,10 +215,19 @@ class TableStore:
         rows = list(self.subs.query_entities("PartitionKey eq 'sub' and confirm_token eq @t", parameters={"t": token}))
         return Subscriber.from_row(rows[0]) if rows else None
 
-    def log_email(self, subject: str, recipients: int, slug: str = "") -> None:
+    def log_email(
+        self, subject: str, recipients: int, slug: str = "", audience: list[str] | None = None, accepted: list[str] | None = None
+    ) -> None:
         stamp = f"{10**13 - int(datetime.now(UTC).timestamp() * 1000):013d}"
-        row = {"PartitionKey": "email", "RowKey": stamp, "subject": subject, "sent": now(), "recipients": recipients, "slug": slug}
-        self.events.upsert_entity(row)
+        row: dict[str, Any] = {"PartitionKey": "email", "RowKey": stamp, "subject": subject, "sent": now(), "recipients": recipients}
+        row["slug"] = slug
+        if audience is not None:
+            row["subscribers"] = len(audience)
+            # one row per recipient in the send's own partition, written 100 at a time (a table transaction's limit)
+            rows = [{"PartitionKey": f"to-{stamp}", "RowKey": r["key"], "ok": r["ok"]} for r in send_log(audience, accepted or [])]
+            for i in range(0, len(rows), 100):
+                self.events.submit_transaction([("upsert", r) for r in rows[i : i + 100]])
+        self.events.upsert_entity(row)  # last, so a listed send always has its recipients
 
     def last_email(self) -> dict[str, Any] | None:
         for r in self.events.query_entities("PartitionKey eq 'email'", results_per_page=1):
@@ -207,6 +237,18 @@ class TableStore:
     def announced(self, slug: str) -> bool:
         rows = self.events.query_entities("PartitionKey eq 'email' and slug eq @s", parameters={"s": slug}, select=["RowKey"])
         return any(True for _ in rows)
+
+    def announcements(self) -> list[dict[str, Any]]:
+        out = []
+        for r in self.events.query_entities("PartitionKey eq 'email' and slug ne ''"):
+            e: dict[str, Any] = {"id": r["RowKey"], "slug": r["slug"], "subject": r["subject"], "sent": r["sent"]}
+            e.update(recipients=int(r["recipients"]), subscribers=None, to=None)
+            if "subscribers" in r:  # sends from before recipient lists were kept have only the count
+                e["subscribers"] = int(r["subscribers"])
+                sent_to = self.events.query_entities("PartitionKey eq @p", parameters={"p": f"to-{r['RowKey']}"})
+                e["to"] = [{"key": t["RowKey"], "ok": bool(t["ok"])} for t in sent_to]
+            out.append(e)
+        return out
 
 
 _store: Store | None = None

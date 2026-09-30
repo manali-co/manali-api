@@ -180,7 +180,7 @@ def unsubscribed_email() -> tuple[str, str]:
 
 class Mailer(Protocol):
     def send(self, to: str, subject: str, html_body: str, headers: dict[str, Any] | None = None) -> int: ...
-    def send_many(self, messages: list[dict[str, Any]], idempotency: str = "") -> int: ...
+    def send_many(self, messages: list[dict[str, Any]], idempotency: str = "", accepted: list[str] | None = None) -> int: ...
 
 
 def message(to: str, subject: str, html_body: str, headers: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -205,7 +205,8 @@ class ResendMailer:
     def send(self, to: str, subject: str, html_body: str, headers: dict[str, Any] | None = None) -> int:
         return self.send_many([message(to, subject, html_body, headers)])
 
-    def send_many(self, messages: list[dict[str, Any]], idempotency: str = "") -> int:
+    def send_many(self, messages: list[dict[str, Any]], idempotency: str = "", accepted: list[str] | None = None) -> int:
+        """`accepted`, when given, collects the addresses of every batch Resend took."""
         if not settings.resend_api_key:
             log.error("RESEND_API_KEY missing; %d message(s) NOT sent", len(messages))
             return 0
@@ -225,6 +226,8 @@ class ResendMailer:
                         continue
                     if r.status_code < 300:
                         sent += len(batch)
+                        if accepted is not None:
+                            accepted.extend(m["to"][0] for m in batch)
                         break
                     if r.status_code == 429 or r.status_code >= 500:
                         wait = float(r.headers.get("retry-after") or 1.5 * (attempt + 1))
@@ -248,9 +251,11 @@ class MemoryMailer:
         self.sent.append(([to], subject, html_body))
         return 1
 
-    def send_many(self, messages: list[dict[str, Any]], idempotency: str = "") -> int:
+    def send_many(self, messages: list[dict[str, Any]], idempotency: str = "", accepted: list[str] | None = None) -> int:
         for m in messages:
             self.sent.append((m["to"], m["subject"], m["html"]))
+            if accepted is not None:
+                accepted.append(m["to"][0])
         return len(messages)
 
 

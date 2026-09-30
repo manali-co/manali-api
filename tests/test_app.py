@@ -246,3 +246,25 @@ def test_comments_share_the_reply_rate_limit() -> None:
     codes = [c.post("/comments/hello", json={"client": me, "text": f"n{i}"}, headers=H).status_code for i in range(6)]
     assert codes[:5] == [202] * 5 and codes[5] == 429
     assert c.post("/comments/hello", json={"client": me, "text": "x", "parent": "nope"}, headers=H).status_code == 400
+
+
+def test_announcements_list_who_got_it() -> None:
+    c = TestClient(app)
+    s = store.get_store()
+    for e in ("a@example.com", "b@example.com"):
+        s.put(store.Subscriber(email=e, confirmed=True, created=store.now()))
+    s.log_email("Old one", 9, slug="old")  # from before recipient lists were kept
+    post = {"slug": "hello", "title": "Hello", "summary": "First.", "url": "https://example.test/blog/hello/", "author": "Ayush"}
+    n = len(mail.get_mailer().sent)
+    preview = c.post("/admin/announce/preview", json=post, headers=A).json()
+    assert preview["subject"] == "New post: Hello" and "Read it" in preview["html"]
+    assert len(mail.get_mailer().sent) == n  # a preview sends nothing
+    assert c.post("/admin/announce", json=post, headers=A).json() == {"recipients": 2, "subscribers": 2}
+    got = c.get("/admin/announcements", headers=A).json()["announcements"]
+    assert [a["slug"] for a in got] == ["hello", "old"]
+    assert got[0]["to"] == [{"email": "a@example.com", "ok": True}, {"email": "b@example.com", "ok": True}]
+    assert got[1]["to"] is None and got[1]["recipients"] == 9
+    c.post("/unsubscribe", json={"token": store.unsubscribe_token("b@example.com")}, headers=H)
+    to = c.get("/admin/announcements", headers=A).json()["announcements"][0]["to"]
+    assert to == [{"email": "a@example.com", "ok": True}, {"email": None, "ok": True}]  # the address is gone
+    assert c.get("/admin/announcements", headers=H).status_code == 401

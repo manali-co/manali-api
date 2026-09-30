@@ -22,7 +22,7 @@ from .reactions import CLIENT, KINDS, SLUG, get_reactions
 from .replies import MAX_TEXT, Reply, get_replies
 from .replies import now_iso as reply_now
 from .settings import settings
-from .store import Subscriber, by_unsub_token, get_store, new_confirm_token, now, parse, purge_pending, unsubscribe_token
+from .store import Subscriber, by_unsub_token, get_store, key, new_confirm_token, now, parse, purge_pending, unsubscribe_token
 
 app = FastAPI(title="manali apps api", docs_url=None, redoc_url=None, openapi_url=None)
 # Local part: no control characters and none of the characters Table Storage rejects in keys
@@ -564,6 +564,32 @@ def announce(post: PostIn) -> dict[str, Any]:
         reason = f"You got this because you follow {post.seriesTitle or 'this series'} at manali apps." if not s.everything else ""
         subject, html_body = mail.post_email(post.model_dump(exclude={"force", "series", "seriesTitle"}), page, reason)
         messages.append(mail.message(s.email, subject, html_body, mail.unsubscribe_headers(one_click)))
-    sent = mail.get_mailer().send_many(messages, idempotency=f"announce/{post.slug}") if messages else 0
-    store.log_email(post.title, sent, slug=post.slug)
+    accepted: list[str] = []
+    sent = mail.get_mailer().send_many(messages, idempotency=f"announce/{post.slug}", accepted=accepted) if messages else 0
+    store.log_email(post.title, sent, slug=post.slug, audience=[s.email for s in live], accepted=accepted)
     return {"recipients": sent, "subscribers": len(live)}
+
+
+@app.post("/admin/announce/preview", dependencies=[Depends(require_admin)])
+def announce_preview(post: PostIn) -> dict[str, Any]:
+    """The exact email a subscriber would get, with a sample unsubscribe link. Sends nothing."""
+    sample_unsub = f"{settings.site_url}/unsubscribe/?token=preview"
+    subject, html_body = mail.post_email(post.model_dump(exclude={"force", "series", "seriesTitle"}), sample_unsub)
+    return {"subject": subject, "html": html_body}
+
+
+@app.get("/admin/announcements", dependencies=[Depends(require_admin)])
+def announcements() -> dict[str, Any]:
+    """Every announcement sent, newest first, with who it went to. Recipients are stored as hashed
+    keys and matched to current subscribers here; someone who has since unsubscribed has no
+    address left to show."""
+    store = get_store()
+    emails = {key(s.email): s.email for s in store.all()}
+    out = []
+    for a in store.announcements():
+        to = a.pop("to")
+        # failed first, then delivered, with the since-unsubscribed at the end of each
+        rows = ({"email": emails.get(t["key"]), "ok": t["ok"]} for t in to or [])
+        a["to"] = None if to is None else sorted(rows, key=lambda t: (t["ok"], t["email"] is None, t["email"] or ""))
+        out.append(a)
+    return {"announcements": out}
