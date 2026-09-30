@@ -218,7 +218,8 @@ class TableStore:
     def log_email(
         self, subject: str, recipients: int, slug: str = "", audience: list[str] | None = None, accepted: list[str] | None = None
     ) -> None:
-        stamp = f"{10**13 - int(datetime.now(UTC).timestamp() * 1000):013d}"
+        # newest sorts first; the suffix keeps two sends in the same millisecond apart
+        stamp = f"{10**13 - int(datetime.now(UTC).timestamp() * 1000):013d}-{secrets.token_hex(4)}"
         row: dict[str, Any] = {"PartitionKey": "email", "RowKey": stamp, "subject": subject, "sent": now(), "recipients": recipients}
         row["slug"] = slug
         if audience is not None:
