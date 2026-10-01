@@ -125,4 +125,6 @@ def page(table: str, offset: int, limit: int) -> dict[str, Any]:
     for r in shown:
         cols += [k for k in r if k not in cols and k != "Timestamp"]
     cols.append("Timestamp")
-    return {"name": table, "purpose": TABLES[table], "columns": cols, "rows": shown, "total": len(rows), "offset": offset, "limit": limit}
+    masked = [c for c in cols if c in SECRET_FIELDS or c == SECRET_KEYS.get(table)]
+    return {"name": table, "purpose": TABLES[table], "columns": cols, "masked": masked, "rows": shown,
+            "total": len(rows), "offset": offset, "limit": limit}

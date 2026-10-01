@@ -332,7 +332,7 @@ def test_admin_data_masks_client_ids() -> None:
     assert tables["replies"]["count"] == 2 and tables["comments"]["count"] == 0
     assert tables["replies"]["updated"] == "2026-09-30T11:00:00Z"
     r = c.get("/admin/data/reactions", headers=A).json()
-    assert r["rows"][0]["RowKey"] == "clie…|love"
+    assert r["rows"][0]["RowKey"] == "clie…|love" and r["masked"] == ["RowKey"]
     rep = c.get("/admin/data/replies?limit=1", headers=A).json()
     assert rep["total"] == 2 and [x["text"] for x in rep["rows"]] == ["newer"]  # newest first
     assert rep["rows"][0]["client"] == "clie…"
