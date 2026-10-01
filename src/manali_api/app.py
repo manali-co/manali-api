@@ -15,7 +15,7 @@ from typing import Any, Literal
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from . import mail
+from . import data, mail, telemetry
 from .comments import MAX_TEXT as COMMENT_MAX
 from .comments import RESERVED, Comment, get_comments, seed_of
 from .reactions import CLIENT, KINDS, SLUG, get_reactions
@@ -636,3 +636,36 @@ def announcements() -> dict[str, Any]:
         a["to"] = None if to is None else sorted(rows, key=lambda t: (t["ok"], t["email"] is None, t["email"] or ""))
         out.append(a)
     return {"announcements": out}
+
+
+@app.get("/admin/telemetry", dependencies=[Depends(require_admin)])
+def admin_telemetry(range: telemetry.Range = "24h") -> dict[str, Any]:  # noqa: A002 - the query parameter's name
+    """Visitors right now and over the range, read from Application Insights. `configured: false`
+    when no component is set; a 502 when it can't be read (most often the role assignment is new)."""
+    try:
+        return telemetry.report(range)
+    except Exception as e:  # the query API, the token, or a KQL change; the page shows the reason
+        raise HTTPException(502, f"telemetry not readable: {e}") from e
+
+
+@app.get("/admin/telemetry/now", dependencies=[Depends(require_admin)])
+def admin_telemetry_now() -> dict[str, Any]:
+    """Only the last few minutes, cheap enough to poll."""
+    try:
+        return telemetry.live()
+    except Exception as e:
+        raise HTTPException(502, f"telemetry not readable: {e}") from e
+
+
+@app.get("/admin/data", dependencies=[Depends(require_admin)])
+def admin_data() -> dict[str, Any]:
+    """Every table: what it holds, how many rows, when it last changed."""
+    return {"tables": data.overview()}
+
+
+@app.get("/admin/data/{table}", dependencies=[Depends(require_admin)])
+def admin_data_table(table: str, offset: int = 0, limit: int = 50) -> dict[str, Any]:
+    """One table's rows, newest first, client ids and pending tokens shortened."""
+    if table not in data.TABLES:
+        raise HTTPException(404, "no such table")
+    return data.page(table, max(0, offset), min(max(1, limit), 200))

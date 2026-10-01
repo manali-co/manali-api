@@ -312,3 +312,73 @@ def test_failed_batches_are_recorded() -> None:
     assert c.post("/admin/announce", json=post, headers=A).json() == {"recipients": 0, "subscribers": 1}
     got = c.get("/admin/announcements", headers=A).json()["announcements"][0]
     assert got["to"] == [{"email": "a@example.com", "ok": False, "follower": False, "reason": "rejected by Resend (422)"}]
+
+
+def test_admin_data_masks_client_ids() -> None:
+    from manali_api import data
+
+    t = data.MemoryTables()
+    t.data = {
+        "reactions": [{"PartitionKey": "hello", "RowKey": "client-abcdef|love", "Timestamp": "2026-09-30T10:00:00Z"}],
+        "replies": [{"PartitionKey": "reply", "RowKey": "1", "client": "client-abcdef", "text": "hi", "Timestamp": "2026-09-30T09:00:00Z"},
+                    {"PartitionKey": "reply", "RowKey": "2", "client": "client-xyz", "text": "newer", "Timestamp": "2026-09-30T11:00:00Z"}],
+        "subscribers": [{"PartitionKey": "sub", "RowKey": "k", "email": "a@example.com", "confirm_token": "secret-token"}],
+    }
+    data._tables = t
+    c = TestClient(app)
+    assert c.get("/admin/data", headers=H).status_code == 401
+    tables = {x["name"]: x for x in c.get("/admin/data", headers=A).json()["tables"]}
+    assert set(tables) == set(data.TABLES)
+    assert tables["replies"]["count"] == 2 and tables["comments"]["count"] == 0
+    assert tables["replies"]["updated"] == "2026-09-30T11:00:00Z"
+    r = c.get("/admin/data/reactions", headers=A).json()
+    assert r["rows"][0]["RowKey"] == "clie…|love"
+    rep = c.get("/admin/data/replies?limit=1", headers=A).json()
+    assert rep["total"] == 2 and [x["text"] for x in rep["rows"]] == ["newer"]  # newest first
+    assert rep["rows"][0]["client"] == "clie…"
+    assert rep["columns"][:2] == ["PartitionKey", "RowKey"] and rep["columns"][-1] == "Timestamp"
+    sub = c.get("/admin/data/subscribers", headers=A).json()["rows"][0]
+    assert sub["email"] == "a@example.com" and sub["confirm_token"] == "secr…"
+    assert c.get("/admin/data/nope", headers=A).status_code == 404
+
+
+def test_admin_telemetry() -> None:
+    from manali_api import telemetry
+
+    class Fake:
+        def __init__(self) -> None:
+            self.seen: list[str] = []
+
+        def query(self, kql: str) -> list[dict]:
+            self.seen.append(kql)
+            if "summarize people = dcount(user_Id)\n" in kql or kql.rstrip().endswith("summarize people = dcount(user_Id)"):
+                return [{"people": 3}]
+            if kql.startswith("union (pageViews") and "make-series" not in kql:
+                return [{"pageviews": 10, "people": 4, "sessions": 5, "seconds": None, "depth": 40.0, "errors": 0, "calls": 7, "failed": 1}]
+            return []
+
+    c = TestClient(app)
+    telemetry._reader = None
+    assert c.get("/admin/telemetry", headers=A).json() == {"configured": False}
+    fake = Fake()
+    telemetry._reader = fake
+    telemetry._cache.clear()
+    out = c.get("/admin/telemetry?range=7d", headers=A).json()
+    assert out["configured"] and out["range"] == "7d" and out["step"] == "6h"
+    assert out["now"]["people"] == 3 and out["totals"]["pageviews"] == 10 and out["totals"]["seconds"] == 0
+    assert all('cloud_RoleName' in q for q in fake.seen)  # never another site's traffic
+    n = len(fake.seen)
+    c.get("/admin/telemetry?range=7d", headers=A)
+    assert len(fake.seen) == n  # cached
+    assert c.get("/admin/telemetry?range=1y", headers=A).status_code == 422
+    assert c.get("/admin/telemetry/now", headers=A).json() == {"configured": True, "people": 3, "pages": [], "window": "5m"}
+
+    class Broken:
+        def query(self, kql: str) -> list[dict]:
+            raise RuntimeError("Application Insights answered 403")
+
+    telemetry._reader = Broken()
+    telemetry._cache.clear()
+    r = c.get("/admin/telemetry", headers=A)
+    assert r.status_code == 502 and "403" in r.json()["detail"]
+    telemetry._reader = None

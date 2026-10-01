@@ -29,6 +29,8 @@ class Settings:
     notify_email: str = field(default_factory=lambda: _env("MANALI_NOTIFY_EMAIL"))
     # Optional postal line for the email footer (some jurisdictions expect one for list mail).
     mail_address: str = field(default_factory=lambda: _env("MANALI_MAIL_ADDRESS"))
+    # Application Insights app id; the admin page reads telemetry from it with the managed identity.
+    appinsights_app_id: str = field(default_factory=lambda: _env("MANALI_APPINSIGHTS_APP_ID"))
 
     @property
     def fake_allowed(self) -> bool:

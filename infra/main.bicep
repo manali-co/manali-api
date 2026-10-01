@@ -49,6 +49,7 @@ resource newAppi 'Microsoft.Insights/components@2020-02-02' = if (ownAppi) {
 }
 
 var appiConnection = ownAppi ? newAppi!.properties.ConnectionString : existingAppi!.properties.ConnectionString
+var appiAppId = ownAppi ? newAppi!.properties.AppId : existingAppi!.properties.AppId
 
 resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: take(storageName, 24)
@@ -87,6 +88,7 @@ resource func 'Microsoft.Web/sites@2023-12-01' = {
       appSettings: [
         { name: 'AzureWebJobsStorage__accountName', value: storage.name }
         { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appiConnection }
+        { name: 'MANALI_APPINSIGHTS_APP_ID', value: appiAppId }
         { name: 'MANALI_TABLES_ENDPOINT', value: storage.properties.primaryEndpoints.table }
         { name: 'MANALI_ENV', value: env }
         { name: 'MANALI_API_KEY', value: apiKey }
@@ -116,6 +118,19 @@ resource roleAssignments 'Microsoft.Authorization/roleAssignments@2022-04-01' = 
     principalType: 'ServicePrincipal'
   }
 }]
+
+// The admin page's telemetry: the function's identity reads the component it reports to. Only
+// granted for a component in this resource group (the deploy principal can't assign roles
+// elsewhere); with a shared component the admin page says telemetry isn't readable.
+resource appiReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (ownAppi) {
+  name: guid(newAppi.id, func.id, 'monitoringReader')
+  scope: newAppi
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '43d0d8ad-25c7-4714-9337-8ba259a9fe05')
+    principalId: func.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
 
 output apiUrl string = 'https://${func.properties.defaultHostName}/api'
 output functionAppName string = func.name
