@@ -7,6 +7,7 @@ and everything else are shown as stored.
 """
 from __future__ import annotations
 
+import heapq
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any, Protocol
@@ -70,16 +71,14 @@ class AzureTables:
     def rows(self, table: str) -> list[dict[str, Any]]:
         from azure.core.exceptions import ResourceNotFoundError
 
-        out = []
+        # Tables come back in key order, not time order, so the whole table is read and only the
+        # newest MAX_ROWS + 1 are kept (one past the cap, so the count can say "5000+").
+        listed = self.svc.get_table_client(table).list_entities(results_per_page=1000)
+        entities = ({**e, "Timestamp": e.metadata.get("timestamp")} for e in listed)
         try:
-            for e in self.svc.get_table_client(table).list_entities(results_per_page=1000):
-                stamp = e.metadata.get("timestamp")
-                out.append({**e, "Timestamp": stamp})
-                if len(out) > MAX_ROWS:
-                    break
+            return heapq.nlargest(MAX_ROWS + 1, entities, key=lambda r: str(r["Timestamp"] or ""))
         except ResourceNotFoundError:
             return []  # created on first use; nothing written yet
-        return out
 
 
 class MemoryTables:

@@ -373,6 +373,25 @@ def test_admin_telemetry() -> None:
     assert c.get("/admin/telemetry?range=1y", headers=A).status_code == 422
     assert c.get("/admin/telemetry/now", headers=A).json() == {"configured": True, "people": 3, "pages": [], "window": "5m"}
 
+    # two requests that miss the cache together share one run
+    import threading
+    import time as _time
+
+    class Slow(Fake):
+        def query(self, kql: str) -> list[dict]:
+            _time.sleep(0.05)
+            return super().query(kql)
+
+    slow = Slow()
+    telemetry._reader = slow
+    telemetry._cache.clear()
+    threads = [threading.Thread(target=telemetry.report, args=("24h",)) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(slow.seen) == len(telemetry.queries("24h"))
+
     class Broken:
         def query(self, kql: str) -> list[dict]:
             raise RuntimeError("Application Insights answered 403")

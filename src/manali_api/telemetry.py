@@ -109,6 +109,8 @@ class AppInsightsReader:
 _reader: Reader | None = None
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _lock = threading.Lock()
+# one report run per range at a time: a second tab or a reload waits for it instead of querying again
+_running: dict[str, threading.Lock] = {r: threading.Lock() for r in WINDOWS}
 CACHE_SECONDS = 20  # a second tab or a reload within 20s costs nothing
 
 
@@ -145,15 +147,16 @@ def report(r: Range) -> dict[str, Any]:
     reader = get_reader()
     if reader is None:
         return {"configured": False}
-    with _lock:
-        hit = _cache.get(r)
-        if hit and time.monotonic() - hit[0] < CACHE_SECONDS:
-            return hit[1]
-    out = _run(reader, queries(r))
-    totals = out["totals"][0] if out["totals"] else {}
-    out["totals"] = {k: (v or 0) for k, v in totals.items()}
-    out["now"] = _now(out)
-    out.update(configured=True, range=r, step=WINDOWS[r][1])
-    with _lock:
-        _cache[r] = (time.monotonic(), out)
-    return out
+    with _running[r]:
+        with _lock:
+            hit = _cache.get(r)
+            if hit and time.monotonic() - hit[0] < CACHE_SECONDS:
+                return hit[1]
+        out = _run(reader, queries(r))
+        totals = out["totals"][0] if out["totals"] else {}
+        out["totals"] = {k: (v or 0) for k, v in totals.items()}
+        out["now"] = _now(out)
+        out.update(configured=True, range=r, step=WINDOWS[r][1])
+        with _lock:
+            _cache[r] = (time.monotonic(), out)
+        return out
