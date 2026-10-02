@@ -351,6 +351,9 @@ def test_admin_telemetry() -> None:
 
         def query(self, kql: str) -> list[dict]:
             self.seen.append(kql)
+            kql = kql.split("\n", 1)[1]  # past the owners lookup every query starts with
+            if "summarize k" in kql or "by k" in kql:
+                return [{"k": "read", "people": 9, "count": 12}, {"k": "posted", "people": 1, "count": 1}]
             if "summarize people = dcount(user_Id)\n" in kql or kql.rstrip().endswith("summarize people = dcount(user_Id)"):
                 return [{"people": 3}]
             if kql.startswith("union (pageViews") and "make-series" not in kql:
@@ -367,6 +370,8 @@ def test_admin_telemetry() -> None:
     assert out["configured"] and out["range"] == "7d" and out["step"] == "6h"
     assert out["now"]["people"] == 3 and out["totals"]["pageviews"] == 10 and out["totals"]["seconds"] == 0
     assert all('cloud_RoleName' in q for q in fake.seen)  # never another site's traffic
+    assert all(q.startswith("let owners") for q in fake.seen)  # never the owner's own visits
+    assert out["engagement"]["read"] == {"people": 9, "count": 12} and out["engagement"]["started"] == {"people": 0, "count": 0}
     n = len(fake.seen)
     c.get("/admin/telemetry?range=7d", headers=A)
     assert len(fake.seen) == n  # cached
