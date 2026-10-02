@@ -131,6 +131,25 @@ def confirm_email(confirm_url: str, series_title: str = "") -> tuple[str, str]:
     return "Confirm your subscription", shell("Confirm your subscription", "One click and you're in.", body, "If you didn't ask for this, ignore it and nothing happens.")
 
 
+# Launch lists ride the series follow: the slug is the app's page, the title its name. The emails
+# say "launch", not "next part", and point at the app's page instead of a series page.
+LAUNCH_LISTS = {"what-should-we-watch": "What Should We Watch"}
+
+
+def launch_confirm_email(confirm_url: str, app_name: str) -> tuple[str, str]:
+    body = (h1(f"Tell you when {app_name} launches?")
+            + p(f"Someone, probably you, joined the {app_name} waitlist on manali apps. One click and you'll get a single email the day it's on the App Store. Nothing else gets sent.")
+            + button("Yes, that was me", confirm_url))
+    return f"Confirm: {app_name} waitlist", shell("Confirm the waitlist", "One click and the launch email comes to you.", body, "If you didn't ask for this, ignore it and nothing happens.")
+
+
+def launch_welcome_email(app_name: str, app_url: str, unsub_url: str) -> tuple[str, str]:
+    line = f"One email the day {app_name} is on the App Store. Nothing else, and one click to stop."
+    body = h1("You're on the list.") + p(line) + button(f"See {app_name}", app_url)
+    reason = f"You got this because you joined the {app_name} waitlist at manali apps."
+    return f"You're on the {app_name} waitlist", shell("You're on the waitlist", line, body, default_footer(unsub_url, reason))
+
+
 def follow_email(series_title: str, series_url: str, everything: bool, unsub_url: str) -> tuple[str, str]:
     """For an address that is already confirmed: following one more series needs no new opt-in,
     but the inbox still hears about it, so the site's "check your inbox" is always true."""

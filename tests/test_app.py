@@ -161,6 +161,25 @@ def test_series_followers_get_only_their_series() -> None:
     assert c.post("/subscribe", json={**follow, "series": "Bad Slug"}, headers=H).status_code == 422
 
 
+def test_launch_waitlist_uses_launch_copy() -> None:
+    c = TestClient(app)
+    mailer = mail.get_mailer()
+    join = {"email": "w@example.com", "source": "wsww-waitlist", "series": "what-should-we-watch", "seriesTitle": "What Should We Watch"}
+    assert c.post("/subscribe", json=join, headers=H).status_code == 202
+    assert mailer.sent[-1][1] == "Confirm: What Should We Watch waitlist"
+    token = store.get_store().get("w@example.com").confirm_token
+    assert c.post("/confirm", json={"token": token}, headers=H).json() == {"ok": True}
+    assert mailer.sent[-1][1] == "You're on the What Should We Watch waitlist"
+    assert "/what-should-we-watch/" in mailer.sent[-1][2] and "/series/" not in mailer.sent[-1][2]
+    sub = store.get_store().get("w@example.com")
+    assert not sub.everything and sub.follows() == ["what-should-we-watch"]  # no blog posts, only the launch
+    # a confirmed blog subscriber joining: no new opt-in, the waitlist note instead
+    c.post("/subscribe", json={"email": "b@example.com"}, headers=H)
+    c.post("/confirm", json={"token": store.get_store().get("b@example.com").confirm_token}, headers=H)
+    c.post("/subscribe", json={**join, "email": "b@example.com"}, headers=H)
+    assert mailer.sent[-1][1] == "You're on the What Should We Watch waitlist"
+
+
 def test_follow_notes_are_capped_per_day() -> None:
     c = TestClient(app)
     mailer = mail.get_mailer()

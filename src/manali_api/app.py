@@ -37,7 +37,8 @@ def _same(a: str, b: str) -> bool:
 
 
 def series_url(slug: str) -> str:
-    return f"{settings.site_url}/series/{slug}/"
+    # A launch list's page is the app's own page, not a series page.
+    return f"{settings.site_url}/{slug}/" if slug in mail.LAUNCH_LISTS else f"{settings.site_url}/series/{slug}/"
 
 
 def unsubscribe_links(email: str) -> tuple[str, str]:
@@ -488,7 +489,10 @@ def subscribe(body: SubscribeIn) -> dict[str, Any]:
                 return {"ok": True}  # at the follow cap: nothing added, nothing sent, same answer
             if may_send(sub, window=False):
                 page, one_click = unsubscribe_links(sub.email)
-                subject, html_body = mail.follow_email(body.seriesTitle or "the series", series_url(body.series), sub.everything, page)
+                if body.series in mail.LAUNCH_LISTS:
+                    subject, html_body = mail.launch_welcome_email(mail.LAUNCH_LISTS[body.series], series_url(body.series), page)
+                else:
+                    subject, html_body = mail.follow_email(body.seriesTitle or "the series", series_url(body.series), sub.everything, page)
                 sent(sub, mail.get_mailer().send(email, subject, html_body, mail.unsubscribe_headers(one_click)))
             store.put(sub)
         elif not sub.everything:
@@ -510,7 +514,11 @@ def subscribe(body: SubscribeIn) -> dict[str, Any]:
         if body.series:
             sub.follow(body.series, body.seriesTitle)
     title = "" if sub.everything else (sub.series_title or "the series")
-    subject, html_body = mail.confirm_email(f"{settings.site_url}/confirm/?token={sub.confirm_token}", title)
+    confirm_url = f"{settings.site_url}/confirm/?token={sub.confirm_token}"
+    if body.series in mail.LAUNCH_LISTS and not sub.everything:
+        subject, html_body = mail.launch_confirm_email(confirm_url, mail.LAUNCH_LISTS[body.series])
+    else:
+        subject, html_body = mail.confirm_email(confirm_url, title)
     sent(sub, mail.get_mailer().send(email, subject, html_body))
     store.put(sub)
     return {"ok": True}
@@ -533,7 +541,10 @@ def confirm(body: TokenIn) -> dict[str, Any]:
         subject, html_body = mail.welcome_email(page)
     else:
         latest = sub.follows()[-1] if sub.follows() else ""
-        subject, html_body = mail.welcome_email(page, sub.series_title or "the series", series_url(latest) if latest else "")
+        if latest in mail.LAUNCH_LISTS:
+            subject, html_body = mail.launch_welcome_email(mail.LAUNCH_LISTS[latest], series_url(latest), page)
+        else:
+            subject, html_body = mail.welcome_email(page, sub.series_title or "the series", series_url(latest) if latest else "")
     mail.get_mailer().send(sub.email, subject, html_body, mail.unsubscribe_headers(one_click))
     return {"ok": True}
 
