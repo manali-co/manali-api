@@ -13,6 +13,8 @@ Reactions (anonymous, per browser) are here too, in the `reactions` table. Comme
 | `POST` | `/unsubscribe` | the site's `/unsubscribe/` page, or the one-click header via the site's `/api/unsubscribe` | Deletes the row and sends the goodbye. Idempotent; the answer never reveals whether the token matched. |
 | `GET` | `/admin/stats` | the admin page | Count, pending count, recent confirmed sign-ups, last email sent. Purges addresses that never confirmed within 7 days. Needs `x-admin-key`. |
 | `POST` | `/admin/announce` | the admin page, after a confirm step | Emails a post to every confirmed address, one message each, in idempotent batches of 100 with retries. Refuses a slug already announced unless `force`. Needs `x-admin-key`. |
+| `GET` | `/admin/telemetry?range=24h\|7d` | the admin page | Visitors and API health from Application Insights, read with the managed identity (Monitoring Reader on a component in this resource group). `/admin/telemetry/now` is just the last five minutes. Needs `x-admin-key`. |
+| `GET` | `/admin/data`, `/admin/data/{table}` | the admin page | Every table with its purpose, row count and last change; one table's rows newest first, 50 a page, client ids and confirmation tokens shortened. Needs `x-admin-key`. |
 | `GET` | `/healthz` | anyone | `{ok, configured, mail, site_url, problems}` |
 
 Everything except `/healthz` needs the `x-api-key` header, and `/admin/*` needs `x-admin-key` as well. Browsers never hold either; the Next.js server does. Until `MANALI_API_KEY`, `MANALI_TOKEN_SECRET` (32+ characters each), an https `MANALI_SITE_URL` and a tables endpoint are set, every route except `/healthz` answers `503` and `/healthz` lists what is missing.
@@ -41,6 +43,7 @@ With `MANALI_ENV=local` (or `test`) and no `MANALI_TABLES_*`, the store is in me
 | `MANALI_SITE_URL` | Where the site lives; every link in email is built from it. Must be https and must serve `/confirm/` and `/unsubscribe/`, so the Vercel host, never the static Pages host. |
 | `MANALI_TABLES_ENDPOINT` | Table endpoint; the function's managed identity reads and writes. |
 | `APPLICATIONINSIGHTS_CONNECTION_STRING` | Set by Bicep from the existing component. |
+| `MANALI_APPINSIGHTS_APP_ID` | Set by Bicep; the component the admin page's telemetry is read from. |
 
 ## Deploy
 

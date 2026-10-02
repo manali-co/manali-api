@@ -29,6 +29,7 @@ line-length = 140
 [tool.ruff.lint.per-file-ignores]
 "src/manali_api/mail.py" = ["E501"]  # inline HTML/CSS for the email templates
 "src/manali_api/replies.py" = ["E501"]
+"src/manali_api/telemetry.py" = ["E501"]  # KQL
 "tests/*" = ["E501"]
 
 [tool.ruff.lint]
