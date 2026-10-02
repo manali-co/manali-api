@@ -99,7 +99,7 @@ def queries(r: Range) -> dict[str, str]:
             | where isnotempty(k) | summarize people = dcount(user_Id), count = count() by k""",
         # the earliest reach/start event in the last 90 days (FUNNEL_FROM when there is none yet); the
         # page only uses it while it falls inside the range, so the 90-day horizon never shows
-        "funnelFrom": f"""customEvents | where timestamp > ago(90d) and {WEB} and name in ("comments_seen", "comment_start")
+        "funnelFrom": f"""customEvents | where timestamp > ago(90d) and {PEOPLE} and name in ("comments_seen", "comment_start")
             | summarize since = min(timestamp)""",
     }
     return {k: f"{OWNERS}\n{v}" for k, v in qs.items()}
