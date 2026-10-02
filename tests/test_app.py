@@ -346,12 +346,15 @@ def test_admin_telemetry() -> None:
     from manali_api import telemetry
 
     class Fake:
-        def __init__(self) -> None:
+        def __init__(self, funnel_since: str | None = None) -> None:
             self.seen: list[str] = []
+            self.funnel_since = funnel_since
 
         def query(self, kql: str) -> list[dict]:
             self.seen.append(kql)
             kql = kql.split("\n", 1)[1]  # past the owners lookup every query starts with
+            if "summarize since = min(timestamp)" in kql:
+                return [{"since": self.funnel_since}] if self.funnel_since else []
             if "summarize k" in kql or "by k" in kql:
                 return [{"k": "read", "people": 9, "count": 12}, {"k": "posted", "people": 1, "count": 1}]
             if "summarize people = dcount(user_Id)\n" in kql or kql.rstrip().endswith("summarize people = dcount(user_Id)"):
@@ -363,7 +366,7 @@ def test_admin_telemetry() -> None:
     c = TestClient(app)
     telemetry._reader = None
     assert c.get("/admin/telemetry", headers=A).json() == {"configured": False}
-    fake = Fake()
+    fake = Fake("2026-10-02T21:00:00Z")
     telemetry._reader = fake
     telemetry._cache.clear()
     out = c.get("/admin/telemetry?range=7d", headers=A).json()
@@ -373,12 +376,21 @@ def test_admin_telemetry() -> None:
     assert all(q.startswith("let owners") for q in fake.seen)  # never the owner's own visits
     # and every visitor query actually uses it; "api" reads server requests, which carry no visitor id
     assert [k for k, q in telemetry.queries("7d").items() if "user_Id !in (owners)" not in q] == ["api"]
+    # readers' API calls only: the admin page's calls and the deploy's health checks stay out
+    api = telemetry.queries("7d")["api"]
+    assert 'startswith "/api/admin/"' in api and '== "/api/healthz"' in api and "not(" in api
     assert out["engagement"]["read"] == {"people": 9, "count": 12} and out["engagement"]["started"] == {"people": 0, "count": 0}
+    assert out["engagement"]["countedFrom"] == "2026-10-02T21:00:00Z"  # the earliest reach/start event
     n = len(fake.seen)
     c.get("/admin/telemetry?range=7d", headers=A)
     assert len(fake.seen) == n  # cached
     assert c.get("/admin/telemetry?range=1y", headers=A).status_code == 422
     assert c.get("/admin/telemetry/now", headers=A).json() == {"configured": True, "people": 3, "pages": [], "window": "5m"}
+
+    # no reach/start event yet: the rollout date
+    telemetry._reader = Fake()
+    telemetry._cache.clear()
+    assert telemetry.report("24h")["engagement"]["countedFrom"] == telemetry.FUNNEL_FROM
 
     # two requests that miss the cache together share one run
     import threading
