@@ -13,7 +13,7 @@ Reactions (anonymous, per browser) are here too, in the `reactions` table. Comme
 | `POST` | `/unsubscribe` | the site's `/unsubscribe/` page, or the one-click header via the site's `/api/unsubscribe` | Deletes the row and sends the goodbye. Idempotent; the answer never reveals whether the token matched. |
 | `GET` | `/admin/stats` | the admin page | Count, pending count, recent confirmed sign-ups, last email sent. Purges addresses that never confirmed within 7 days. Needs `x-admin-key`. |
 | `POST` | `/admin/announce` | the admin page, after a confirm step | Emails a post to every confirmed address, one message each, in idempotent batches of 100 with retries. Refuses a slug already announced unless `force`. Needs `x-admin-key`. |
-| `GET` | `/admin/telemetry?range=24h\|7d` | the admin page | Visitors and API health from Application Insights, read with the managed identity (Monitoring Reader on a component in this resource group). `/admin/telemetry/now` is just the last five minutes. Needs `x-admin-key`. |
+| `GET` | `/admin/telemetry?range=24h\|7d` | the admin page | Visitors only (any browser that opened /admin is the owner's and is left out), the comments funnel, and API health for readers' calls, from Application Insights, read with the managed identity (Monitoring Reader on a component in this resource group). `/admin/telemetry/now` is just the last five minutes. Needs `x-admin-key`. |
 | `GET` | `/admin/data`, `/admin/data/{table}` | the admin page | Every table with its purpose, row count and last change; one table's rows newest first, 50 a page, client ids and confirmation tokens shortened. Needs `x-admin-key`. |
 | `GET` | `/healthz` | anyone | `{ok, configured, mail, site_url, problems}` |
 
