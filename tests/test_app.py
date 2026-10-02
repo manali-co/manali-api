@@ -371,6 +371,8 @@ def test_admin_telemetry() -> None:
     assert out["now"]["people"] == 3 and out["totals"]["pageviews"] == 10 and out["totals"]["seconds"] == 0
     assert all('cloud_RoleName' in q for q in fake.seen)  # never another site's traffic
     assert all(q.startswith("let owners") for q in fake.seen)  # never the owner's own visits
+    # and every visitor query actually uses it; "api" reads server requests, which carry no visitor id
+    assert [k for k, q in telemetry.queries("7d").items() if "user_Id !in (owners)" not in q] == ["api"]
     assert out["engagement"]["read"] == {"people": 9, "count": 12} and out["engagement"]["started"] == {"people": 0, "count": 0}
     n = len(fake.seen)
     c.get("/admin/telemetry?range=7d", headers=A)
