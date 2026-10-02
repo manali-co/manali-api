@@ -19,18 +19,20 @@ Range = Literal["24h", "7d"]
 # window and chart bucket per range: 24 hourly bars, 28 six-hour bars
 WINDOWS: dict[str, tuple[str, str]] = {"24h": ("24h", "1h"), "7d": ("7d", "6h")}
 NOW_WINDOW = "5m"
+FUNNEL_FROM = "2026-10-02T20:00:00Z"  # when comments_seen / comment_start shipped on the site
 ENGAGEMENT = ("read", "reached", "started", "posted", "reacted", "subscribed", "followed", "loved", "waitlist")
 
 WEB = 'cloud_RoleName == "manali-web"'
 API = 'cloud_RoleName startswith "manali-" and cloud_RoleName endswith "-api"'
 # The owner's browsers: any that loaded /admin (only the owner gets past sign-in), looked up over 90
 # days so it also covers visits from before this filter existed. Every query starts with it.
-OWNERS = f'let owners = pageViews | where timestamp > ago(90d) and {WEB} and url has "/admin" | distinct user_Id;'
+# Matched on the path, not `has`: `has` matches whole terms, so a post slug with "admin" in it would count its readers as the owner.
+OWNERS = f'let owners = pageViews | where timestamp > ago(90d) and {WEB} and tostring(parse_url(url).Path) startswith "/admin" | distinct user_Id;'
 PEOPLE = f"{WEB} and user_Id !in (owners)"
 # parse_url reads the home page's path as empty, so it is put back as "/"
 VISITOR = f'{PEOPLE} | extend page = tostring(parse_url(url).Path) | extend page = iff(isempty(page), "/", page) | where not(page startswith "/admin" or page startswith "/sign-in")'
 # Calls readers cause: not the admin page's own calls, not the deploy's health checks.
-PUBLIC_API = f'{API} and not(url has "/api/admin/" or url endswith "/healthz")'
+PUBLIC_API = f'{API} and not(tostring(parse_url(url).Path) startswith "/api/admin/" or tostring(parse_url(url).Path) == "/api/healthz")'
 # A post page: /blog/<slug>/, not the index or a project filter.
 POST_PAGE = r'page matches regex @"^/blog/[^/]+/?$" and not(page startswith "/blog/project")'
 
@@ -95,7 +97,8 @@ def queries(r: Range) -> dict[str, str]:
                         name == "series_follow" and result == "ok", "followed", name == "comment_love" and on == "true", "loved",
                         name == "waitlist" and result == "ok", "waitlist", ""))
             | where isnotempty(k) | summarize people = dcount(user_Id), count = count() by k""",
-        # when the reach and start events began, so the page can say the funnel's middle is younger
+        # the earliest reach/start event in the last 90 days (FUNNEL_FROM when there is none yet); the
+        # page only uses it while it falls inside the range, so the 90-day horizon never shows
         "funnelFrom": f"""customEvents | where timestamp > ago(90d) and {WEB} and name in ("comments_seen", "comment_start")
             | summarize since = min(timestamp)""",
     }
@@ -183,7 +186,7 @@ def report(r: Range) -> dict[str, Any]:
         steps = {row["k"]: {"people": row["people"], "count": row["count"]} for row in out.pop("engagement")}
         first = out.pop("funnelFrom")
         out["engagement"] = {k: steps.get(k, {"people": 0, "count": 0}) for k in ENGAGEMENT}
-        out["engagement"]["countedFrom"] = first[0]["since"] if first else None
+        out["engagement"]["countedFrom"] = (first[0]["since"] if first else None) or FUNNEL_FROM
         out.update(configured=True, range=r, step=WINDOWS[r][1])
         with _lock:
             _cache[r] = (time.monotonic(), out)
